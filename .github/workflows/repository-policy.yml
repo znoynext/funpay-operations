@@ -1,0 +1,30 @@
+name: Repository policy
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    name: Repository policy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify required proprietary notices
+        shell: bash
+        run: |
+          test -f LICENSE
+          test -f CODEOWNERS
+          test -f .github/dependabot.yml
+          grep -Fq 'All Rights Reserved' LICENSE
+          grep -Fqi 'not open source' LICENSE
+      - name: Reject common sensitive artifacts
+        shell: bash
+        run: |
+          ! git ls-files | grep -E '(^|/)(\.env|\.env\..+|secrets/|data/|logs/|backups/)|\.(pem|key|pfx|p12|db|sqlite|sqlite3|bak|backup|log)$'
