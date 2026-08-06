@@ -14,6 +14,8 @@ Copyright (c) 2026 znoynext. **All Rights Reserved.**
   descriptions, local FunPay dialogs/messages, event de-duplication, task
   state, and rollback price snapshots.
 - Separate modules for FunPay, Telegram, lots, pricing, messages, and tasks.
+- Independent Mythic+ and Delves service models with stable internal codes,
+  validation, serialization, and in-memory duplicate protection.
 - Configuration from `.env` and YAML, with safe sample files only.
 - A Windows DPAPI setup command for local secret storage. It never writes secrets to Git or `.env`.
 - A read-only FunPay client boundary with normalized profiles, lots, dialogs, and
@@ -24,6 +26,16 @@ Copyright (c) 2026 znoynext. **All Rights Reserved.**
 The scaffold deliberately contains no browser automation, mouse/keyboard control,
 visible browser, or implementation of real FunPay actions. Real operations are
 disabled by default and require explicit owner approval for each concrete action.
+
+## Service models
+
+`funpay_operations.services` defines only local domain descriptions; it neither
+creates nor updates FunPay lots. Mythic+ records validate key level, region,
+service format, package size, and normalized price conditions. Delves records
+validate tier, Bountiful status, region, service format, and package size. Codes
+are deterministic (for example, `mplus_10_selfplay_x1` and
+`delve_t8_bountiful_selfplay_x1`); the deduplication key also includes regional
+and price-condition variants where relevant.
 
 ## Local setup
 
