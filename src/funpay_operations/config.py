@@ -37,6 +37,8 @@ class Settings:
     funpay_min_request_interval_seconds: float = 1.0
     funpay_retry_attempts: int = 3
     funpay_read_endpoints: tuple[tuple[str, str], ...] = ()
+    telegram_enabled: bool = False
+    telegram_long_poll_timeout_seconds: int = 25
 
 
 def _mapping(value: Any, field: str) -> dict[str, Any]:
@@ -112,6 +114,12 @@ def load_settings(*, config_path: Path, env_path: Path) -> Settings:
     raw_allowed_users = telegram.get("allowed_user_ids", [])
     if not isinstance(raw_allowed_users, list) or not all(isinstance(user_id, int) for user_id in raw_allowed_users):
         raise ConfigurationError("telegram.allowed_user_ids must be a list of integers")
+    telegram_enabled = _bool(telegram.get("enabled", False), "telegram.enabled")
+    telegram_timeout = _positive_int(
+        telegram.get("long_poll_timeout_seconds", 25), "telegram.long_poll_timeout_seconds"
+    )
+    if telegram_timeout > 50:
+        raise ConfigurationError("telegram.long_poll_timeout_seconds must not exceed 50")
     hard_floor = lots.get("hard_floor")
     if hard_floor is not None:
         hard_floor = _positive_int(hard_floor, "lots.hard_floor")
@@ -158,4 +166,6 @@ def load_settings(*, config_path: Path, env_path: Path) -> Settings:
         funpay_min_request_interval_seconds=float(request_interval),
         funpay_retry_attempts=retry_attempts,
         funpay_read_endpoints=read_endpoints,
+        telegram_enabled=telegram_enabled,
+        telegram_long_poll_timeout_seconds=telegram_timeout,
     )

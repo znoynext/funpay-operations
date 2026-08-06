@@ -5,10 +5,9 @@ import unittest
 from pathlib import Path
 
 from funpay_operations.database import Database
-from funpay_operations.funpay import MockFunPayClient, RealOperationsDisabled
+from funpay_operations.funpay import MockFunPayClient
 from funpay_operations.lots import Lot, LotRepository
 from funpay_operations.pricing import PricePolicy
-from funpay_operations.telegram import TelegramClient
 
 
 class DomainTests(unittest.TestCase):
@@ -29,8 +28,6 @@ class DomainTests(unittest.TestCase):
         funpay = MockFunPayClient()
         self.assertTrue(funpay.check_authorization())
         self.assertNotIn("update_lot", funpay.calls)
-        with self.assertRaises(RealOperationsDisabled):
-            TelegramClient("telegram_token", (1,)).require_explicit_send(1)
 
     def test_price_policy_respects_floor(self) -> None:
         with self.assertRaises(ValueError):

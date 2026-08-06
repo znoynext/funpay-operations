@@ -57,6 +57,18 @@ The generated `data/` directory, SQLite database, logs, and DPAPI store are
 ignored by Git. Do not put tokens, session data, messages, customer data, or
 transaction data in source files, YAML, or commits.
 
+## Telegram control bot
+
+The bot uses the official Telegram Bot API with long polling only; webhooks are
+not configured. First store the token locally with `funpay-setup set
+telegram_bot_token`, add your numeric Telegram user ID to the ignored
+`config.yaml`, then set `telegram.enabled: true`. The bot accepts commands only
+from an allowlisted **private** chat; rejected commands are recorded in the
+local security log without message text or token values. `/start`, `/status`,
+`/pause`, `/resume`, and `/stop` are available now, including a button menu.
+The remaining menu commands reply that their corresponding FunPay module is not
+yet available. The token is never read by CI or stored in Git.
+
 ## FunPay read integration
 
 FunPay does not provide a documented, stable public seller API contract. The

@@ -161,6 +161,15 @@ class TaskStateRepository:
                 (task_name, state, cursor, last_error),
             )
 
+    def load(self, task_name: str) -> tuple[str, str | None] | None:
+        if not task_name.strip():
+            raise ValueError("task name is required")
+        with self.database.session() as connection:
+            row = connection.execute(
+                "SELECT state, cursor FROM task_state WHERE task_name = ?", (task_name,)
+            ).fetchone()
+        return (row["state"], row["cursor"]) if row else None
+
 
 class PriceSnapshotRepository:
     def __init__(self, database: Database) -> None:

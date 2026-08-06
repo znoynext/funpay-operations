@@ -28,6 +28,10 @@ funpay:
 
 telegram:
   token_key: telegram_bot_token
+  # Keep disabled until the token is stored through funpay-setup and user IDs
+  # are entered in this ignored local configuration file.
+  enabled: false
+  long_poll_timeout_seconds: 25
   allowed_user_ids: []
 
 lots:
