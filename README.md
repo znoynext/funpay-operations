@@ -35,8 +35,17 @@ To store a local secret, use the Windows-only setup wizard; it reads the value
 without echoing it and encrypts it with DPAPI for the current Windows user.
 
 ```powershell
+funpay-setup init
 funpay-setup set telegram_bot_token
+funpay-setup set funpay_session
+funpay-setup diagnostics
 ```
+
+`config.yaml` contains only logical secret key names, allowlisted Telegram user
+IDs, operating mode, polling/reconnect intervals, and relative local paths.
+Supported modes are `safe`, `dry_run`, and `live`; `safe` is the default and
+does not permit real operations. Diagnostics report secret presence only as
+`<masked>` or `<missing>`.
 
 The generated `data/` directory, SQLite database, logs, and DPAPI store are
 ignored by Git. Do not put tokens, session data, messages, customer data, or

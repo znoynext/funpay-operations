@@ -17,6 +17,9 @@ class BackgroundRunnerTests(unittest.TestCase):
             root = Path(temporary_directory)
             database = Database(root / "operations.sqlite3")
             database.initialize()
-            settings = Settings("test", "INFO", root, database.path, False, 1, "funpay", "telegram", (), "RUB", None)
+            settings = Settings(
+                "test", "INFO", root, database.path, root / "logs", root / "backups",
+                "safe", False, 1, 1, 2, "funpay", "telegram", (), "RUB", None,
+            )
             logger = logging.getLogger("funpay_operations.tests")
             asyncio.run(BackgroundRunner(settings, database, logger).run(once=True))

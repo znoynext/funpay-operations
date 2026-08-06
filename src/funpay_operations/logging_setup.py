@@ -7,10 +7,9 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 
-def configure_logging(data_directory: Path, log_level: str) -> logging.Logger:
+def configure_logging(logs_directory: Path, log_level: str) -> logging.Logger:
     """Configure an application-owned logger without logging configuration secrets."""
 
-    logs_directory = data_directory / "logs"
     logs_directory.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger("funpay_operations")
     logger.setLevel(log_level)

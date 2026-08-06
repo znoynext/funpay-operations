@@ -21,8 +21,13 @@ class Settings:
     log_level: str
     data_directory: Path
     database_path: Path
+    logs_directory: Path
+    backups_directory: Path
+    operation_mode: str
     operations_enabled: bool
     poll_interval_seconds: int
+    reconnect_initial_seconds: int
+    reconnect_max_seconds: int
     funpay_credential_key: str
     telegram_token_key: str
     allowed_telegram_user_ids: tuple[int, ...]
@@ -48,6 +53,18 @@ def _bool(value: Any, field: str) -> bool:
     return value
 
 
+def _child_directory(parent: Path, value: Any, field: str) -> Path:
+    if not isinstance(value, str) or not value or Path(value).name != value:
+        raise ConfigurationError(f"{field} must be a simple directory name")
+    return parent / value
+
+
+def _secret_key(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value or not value.replace("_", "").isalnum():
+        raise ConfigurationError(f"{field} must be an alphanumeric or underscore secret key")
+    return value
+
+
 def load_settings(*, config_path: Path, env_path: Path) -> Settings:
     """Load non-sensitive settings from YAML and optional `.env` overrides."""
 
@@ -69,6 +86,10 @@ def load_settings(*, config_path: Path, env_path: Path) -> Settings:
     database_file = storage.get("database_file", "funpay.sqlite3")
     if not isinstance(database_file, str) or Path(database_file).name != database_file:
         raise ConfigurationError("storage.database_file must be a filename, not a path")
+    logs_directory = _child_directory(data_directory, storage.get("logs_directory", "logs"), "storage.logs_directory")
+    backups_directory = _child_directory(
+        data_directory, storage.get("backups_directory", "backups"), "storage.backups_directory"
+    )
 
     raw_allowed_users = telegram.get("allowed_user_ids", [])
     if not isinstance(raw_allowed_users, list) or not all(isinstance(user_id, int) for user_id in raw_allowed_users):
@@ -78,15 +99,32 @@ def load_settings(*, config_path: Path, env_path: Path) -> Settings:
         hard_floor = _positive_int(hard_floor, "lots.hard_floor")
 
     poll_interval = _positive_int(operations.get("poll_interval_seconds", 30), "operations.poll_interval_seconds")
+    reconnect_initial = _positive_int(
+        operations.get("reconnect_initial_seconds", 5), "operations.reconnect_initial_seconds"
+    )
+    reconnect_max = _positive_int(operations.get("reconnect_max_seconds", 60), "operations.reconnect_max_seconds")
+    if reconnect_max < reconnect_initial:
+        raise ConfigurationError("operations.reconnect_max_seconds must be at least the initial interval")
+    operation_mode = os.getenv("FUNPAY_MANAGER_MODE", str(operations.get("mode", "safe"))).lower()
+    if operation_mode not in {"safe", "dry_run", "live"}:
+        raise ConfigurationError("operations.mode must be safe, dry_run, or live")
+    operations_enabled = _bool(operations.get("enabled", False), "operations.enabled")
+    if operation_mode != "live" and operations_enabled:
+        raise ConfigurationError("operations.enabled may only be true in live mode")
     return Settings(
         environment=str(app.get("environment", "development")),
         log_level=os.getenv("FUNPAY_MANAGER_LOG_LEVEL", str(app.get("log_level", "INFO"))).upper(),
         data_directory=data_directory,
         database_path=data_directory / database_file,
-        operations_enabled=_bool(operations.get("enabled", False), "operations.enabled"),
+        logs_directory=logs_directory,
+        backups_directory=backups_directory,
+        operation_mode=operation_mode,
+        operations_enabled=operations_enabled,
         poll_interval_seconds=poll_interval,
-        funpay_credential_key=str(funpay.get("credential_key", "funpay_session")),
-        telegram_token_key=str(telegram.get("token_key", "telegram_bot_token")),
+        reconnect_initial_seconds=reconnect_initial,
+        reconnect_max_seconds=reconnect_max,
+        funpay_credential_key=_secret_key(funpay.get("credential_key", "funpay_session"), "funpay.credential_key"),
+        telegram_token_key=_secret_key(telegram.get("token_key", "telegram_bot_token"), "telegram.token_key"),
         allowed_telegram_user_ids=tuple(raw_allowed_users),
         default_currency=str(lots.get("default_currency", "RUB")),
         hard_floor=hard_floor,

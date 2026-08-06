@@ -5,12 +5,17 @@ app:
 
 storage:
   database_file: funpay.sqlite3
+  logs_directory: logs
+  backups_directory: backups
 
 operations:
   # Real actions are off by default. Enabling them will require a later,
   # explicit implementation and configuration review.
   enabled: false
+  mode: safe
   poll_interval_seconds: 30
+  reconnect_initial_seconds: 5
+  reconnect_max_seconds: 60
 
 funpay:
   credential_key: funpay_session

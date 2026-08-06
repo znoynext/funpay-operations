@@ -15,7 +15,7 @@ class Application:
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.logger = configure_logging(settings.data_directory, settings.log_level)
+        self.logger = configure_logging(settings.logs_directory, settings.log_level)
         self.database = Database(settings.database_path)
         self.runner = BackgroundRunner(settings, self.database, self.logger)
 
@@ -24,6 +24,7 @@ class Application:
         return cls(load_settings(config_path=config_path, env_path=env_path))
 
     async def run(self, *, once: bool) -> None:
+        self.settings.backups_directory.mkdir(parents=True, exist_ok=True)
         self.database.initialize()
         self.logger.info("Application started in %s environment", self.settings.environment)
         await self.runner.run(once=once)

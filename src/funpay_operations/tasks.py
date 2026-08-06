@@ -33,4 +33,8 @@ class BackgroundRunner:
     async def run_cycle(self) -> None:
         """Reserve the boundary; this implementation performs no network operation."""
 
-        self.logger.info("Safe background cycle completed; real operations remain disabled=%s", not self.settings.operations_enabled)
+        self.logger.info(
+            "Safe background cycle completed; mode=%s real operations disabled=%s",
+            self.settings.operation_mode,
+            not self.settings.operations_enabled,
+        )
