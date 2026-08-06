@@ -12,11 +12,15 @@ from .telegram import TelegramClient
 
 
 class BackgroundRunner:
-    def __init__(self, settings: Settings, database: Database, logger: logging.Logger) -> None:
+    def __init__(
+        self, settings: Settings, database: Database, logger: logging.Logger, *, funpay: FunPayClient | None = None
+    ) -> None:
         self.settings = settings
         self.database = database
         self.logger = logger
-        self.funpay = FunPayClient(settings.funpay_credential_key, settings.operations_enabled)
+        # Injection constructs no session and the background loop does not
+        # call it until a later explicitly scheduled read task exists.
+        self.funpay = funpay
         self.telegram = TelegramClient(
             settings.telegram_token_key,
             settings.allowed_telegram_user_ids,

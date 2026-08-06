@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from funpay_operations.database import Database
-from funpay_operations.funpay import FunPayClient, RealOperationsDisabled
+from funpay_operations.funpay import MockFunPayClient, RealOperationsDisabled
 from funpay_operations.lots import Lot, LotRepository
 from funpay_operations.pricing import PricePolicy
 from funpay_operations.telegram import TelegramClient
@@ -26,8 +26,9 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(result, {"title": "Example", "price_minor": 100})
 
     def test_external_actions_are_disabled_by_default(self) -> None:
-        with self.assertRaises(RealOperationsDisabled):
-            FunPayClient("funpay_session").require_explicit_operation("update_lot")
+        funpay = MockFunPayClient()
+        self.assertTrue(funpay.check_authorization())
+        self.assertNotIn("update_lot", funpay.calls)
         with self.assertRaises(RealOperationsDisabled):
             TelegramClient("telegram_token", (1,)).require_explicit_send(1)
 

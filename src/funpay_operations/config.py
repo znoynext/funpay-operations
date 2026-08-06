@@ -33,6 +33,10 @@ class Settings:
     allowed_telegram_user_ids: tuple[int, ...]
     default_currency: str
     hard_floor: int | None
+    funpay_request_timeout_seconds: int = 15
+    funpay_min_request_interval_seconds: float = 1.0
+    funpay_retry_attempts: int = 3
+    funpay_read_endpoints: tuple[tuple[str, str], ...] = ()
 
 
 def _mapping(value: Any, field: str) -> dict[str, Any]:
@@ -63,6 +67,20 @@ def _secret_key(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value or not value.replace("_", "").isalnum():
         raise ConfigurationError(f"{field} must be an alphanumeric or underscore secret key")
     return value
+
+
+def _read_endpoints(value: Any) -> tuple[tuple[str, str], ...]:
+    endpoints = _mapping(value, "funpay.read_endpoints")
+    supported = {"profile", "own_lots", "seller_lots", "dialogs", "new_messages", "bump_availability"}
+    unexpected = set(endpoints) - supported
+    if unexpected:
+        raise ConfigurationError(f"unsupported FunPay read endpoint: {sorted(unexpected)[0]}")
+    result: list[tuple[str, str]] = []
+    for name, path in endpoints.items():
+        if not isinstance(path, str) or not path.startswith("/") or "//" in path or ":" in path:
+            raise ConfigurationError(f"funpay.read_endpoints.{name} must be a relative path")
+        result.append((name, path))
+    return tuple(sorted(result))
 
 
 def load_settings(*, config_path: Path, env_path: Path) -> Settings:
@@ -111,6 +129,14 @@ def load_settings(*, config_path: Path, env_path: Path) -> Settings:
     operations_enabled = _bool(operations.get("enabled", False), "operations.enabled")
     if operation_mode != "live" and operations_enabled:
         raise ConfigurationError("operations.enabled may only be true in live mode")
+    read_endpoints = _read_endpoints(funpay.get("read_endpoints", {}))
+    request_timeout = _positive_int(
+        funpay.get("request_timeout_seconds", 15), "funpay.request_timeout_seconds"
+    )
+    request_interval = funpay.get("min_request_interval_seconds", 1.0)
+    if not isinstance(request_interval, (int, float)) or isinstance(request_interval, bool) or request_interval < 0:
+        raise ConfigurationError("funpay.min_request_interval_seconds must be a non-negative number")
+    retry_attempts = _positive_int(funpay.get("retry_attempts", 3), "funpay.retry_attempts")
     return Settings(
         environment=str(app.get("environment", "development")),
         log_level=os.getenv("FUNPAY_MANAGER_LOG_LEVEL", str(app.get("log_level", "INFO"))).upper(),
@@ -128,4 +154,8 @@ def load_settings(*, config_path: Path, env_path: Path) -> Settings:
         allowed_telegram_user_ids=tuple(raw_allowed_users),
         default_currency=str(lots.get("default_currency", "RUB")),
         hard_floor=hard_floor,
+        funpay_request_timeout_seconds=request_timeout,
+        funpay_min_request_interval_seconds=float(request_interval),
+        funpay_retry_attempts=retry_attempts,
+        funpay_read_endpoints=read_endpoints,
     )

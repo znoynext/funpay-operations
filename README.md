@@ -16,6 +16,9 @@ Copyright (c) 2026 znoynext. **All Rights Reserved.**
 - Separate modules for FunPay, Telegram, lots, pricing, messages, and tasks.
 - Configuration from `.env` and YAML, with safe sample files only.
 - A Windows DPAPI setup command for local secret storage. It never writes secrets to Git or `.env`.
+- A read-only FunPay client boundary with normalized profiles, lots, dialogs, and
+  messages. It uses only authenticated `GET` requests, retries transient network
+  failures with a bound, and enforces a per-client request interval.
 - Rotating local logs under the ignored `data/` directory.
 
 The scaffold deliberately contains no browser automation, mouse/keyboard control,
@@ -53,6 +56,20 @@ does not permit real operations. Diagnostics report secret presence only as
 The generated `data/` directory, SQLite database, logs, and DPAPI store are
 ignored by Git. Do not put tokens, session data, messages, customer data, or
 transaction data in source files, YAML, or commits.
+
+## FunPay read integration
+
+FunPay does not provide a documented, stable public seller API contract. The
+project therefore does not ship guessed endpoints or a browser automation
+workaround. Configure only owner-verified **relative** GET paths under
+`funpay.read_endpoints` in the ignored local `config.yaml`; the supported
+placeholder names are `{seller_id}`, `{after_message_id}`, and `{lot_id}`.
+Until a path is configured, that capability fails closed. The adapter accepts a
+session only through a callable backed by the ignored Windows DPAPI store and
+does not log, print, commit, or send it to CI. It rejects HTTP 401/403 as an
+expired session and represents unavailable networking separately from malformed
+responses. No endpoint in this release can create, edit, delete, send, or bump
+anything on FunPay.
 
 Migrations run automatically at startup. They are idempotent, applied inside a
 transaction, and preserve the initial scaffold tables for compatibility. A

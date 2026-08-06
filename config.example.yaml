@@ -19,6 +19,12 @@ operations:
 
 funpay:
   credential_key: funpay_session
+  # No official seller API contract is configured here. Add only owner-verified
+  # relative GET paths; values may use {seller_id}, {after_message_id}, {lot_id}.
+  read_endpoints: {}
+  request_timeout_seconds: 15
+  min_request_interval_seconds: 1.0
+  retry_attempts: 3
 
 telegram:
   token_key: telegram_bot_token

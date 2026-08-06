@@ -69,3 +69,24 @@ operations:
             )
             with self.assertRaises(ConfigurationError):
                 load_settings(config_path=config, env_path=root / ".env")
+
+    def test_validates_read_only_funpay_options(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = root / "config.yaml"
+            config.write_text(
+                "funpay:\n  read_endpoints:\n    profile: https://example.invalid/profile\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ConfigurationError):
+                load_settings(config_path=config, env_path=root / ".env")
+
+            config.write_text(
+                "funpay:\n  request_timeout_seconds: 20\n  min_request_interval_seconds: 0.5\n"
+                "  retry_attempts: 2\n  read_endpoints:\n    profile: /account/profile\n",
+                encoding="utf-8",
+            )
+            settings = load_settings(config_path=config, env_path=root / ".env")
+
+        self.assertEqual(settings.funpay_request_timeout_seconds, 20)
+        self.assertEqual(settings.funpay_read_endpoints, (("profile", "/account/profile"),))
