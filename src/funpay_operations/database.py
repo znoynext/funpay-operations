@@ -174,6 +174,23 @@ MIGRATIONS: tuple[Migration, ...] = (
             "CREATE INDEX IF NOT EXISTS idx_reply_attempts_chat ON funpay_reply_attempts(telegram_chat_id, state)",
         ),
     ),
+    (
+        4,
+        "FunPay automatic greeting state",
+        (
+            """CREATE TABLE IF NOT EXISTS funpay_auto_replies (
+                id INTEGER PRIMARY KEY,
+                trigger_funpay_message_id INTEGER NOT NULL UNIQUE REFERENCES funpay_messages(id) ON DELETE CASCADE,
+                funpay_dialog_id INTEGER NOT NULL REFERENCES funpay_dialogs(id) ON DELETE CASCADE,
+                trigger_sent_at TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                state TEXT NOT NULL CHECK (state IN ('sending', 'sent', 'failed')),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_auto_replies_dialog ON funpay_auto_replies(funpay_dialog_id, trigger_sent_at)",
+        ),
+    ),
 )
 
 
