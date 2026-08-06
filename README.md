@@ -10,6 +10,9 @@ Copyright (c) 2026 znoynext. **All Rights Reserved.**
 
 - A Python package with a command-line entry point and an `asyncio` background runner.
 - SQLite persistence for lots and message templates; no statistics subsystem.
+- Versioned, transactional SQLite migrations for sellers, lots, prices,
+  descriptions, local FunPay dialogs/messages, event de-duplication, task
+  state, and rollback price snapshots.
 - Separate modules for FunPay, Telegram, lots, pricing, messages, and tasks.
 - Configuration from `.env` and YAML, with safe sample files only.
 - A Windows DPAPI setup command for local secret storage. It never writes secrets to Git or `.env`.
@@ -50,6 +53,11 @@ does not permit real operations. Diagnostics report secret presence only as
 The generated `data/` directory, SQLite database, logs, and DPAPI store are
 ignored by Git. Do not put tokens, session data, messages, customer data, or
 transaction data in source files, YAML, or commits.
+
+Migrations run automatically at startup. They are idempotent, applied inside a
+transaction, and preserve the initial scaffold tables for compatibility. A
+failed transaction rolls back rather than leaving partial task, event, message,
+or price updates behind.
 
 ## Checks
 
