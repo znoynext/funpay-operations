@@ -1,0 +1,24 @@
+app:
+  environment: development
+  log_level: INFO
+  data_directory: data
+
+storage:
+  database_file: funpay.sqlite3
+
+operations:
+  # Real actions are off by default. Enabling them will require a later,
+  # explicit implementation and configuration review.
+  enabled: false
+  poll_interval_seconds: 30
+
+funpay:
+  credential_key: funpay_session
+
+telegram:
+  token_key: telegram_bot_token
+  allowed_user_ids: []
+
+lots:
+  default_currency: RUB
+  hard_floor: null
