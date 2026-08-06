@@ -16,6 +16,8 @@ Copyright (c) 2026 znoynext. **All Rights Reserved.**
 - Separate modules for FunPay, Telegram, lots, pricing, messages, and tasks.
 - Independent Mythic+ and Delves service models with stable internal codes,
   validation, serialization, and in-memory duplicate protection.
+- Versioned public YAML seasonal-data records and a fail-closed description
+  preview generator for Mythic+ and Delves.
 - Configuration from `.env` and YAML, with safe sample files only.
 - A Windows DPAPI setup command for local secret storage. It never writes secrets to Git or `.env`.
 - A read-only FunPay client boundary with normalized profiles, lots, dialogs, and
@@ -36,6 +38,20 @@ validate tier, Bountiful status, region, service format, package size, and
 normalized price conditions. Codes are deterministic (for example, `mplus_10_selfplay_x1` and
 `delve_t8_bountiful_selfplay_x1`); the deduplication key also includes regional
 and price-condition variants where relevant.
+
+## Seasonal data and description previews
+
+Public seasonal metadata lives under `seasonal_data/v1/` and includes only
+season, region, dates, reward ilvls, crests, verification date, sources, and
+confirmation status. The published starter records deliberately remain
+`unconfirmed` until an owner enters current, verifiable HTTPS sources and marks
+them `confirmed`; the generator rejects every unconfirmed record. It does not
+fetch source URLs, create FunPay lots, or use account data.
+
+`DescriptionGenerator` produces previews only. Mythic+ through +12 emphasizes
+verified rewards, ilvl, and crests; +13 and higher emphasizes Mythic+ rating and
+high keys. Delves has its own template. Every template explicitly states that a
+random item is not guaranteed.
 
 ## Local setup
 

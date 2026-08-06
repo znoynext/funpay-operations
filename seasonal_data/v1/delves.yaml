@@ -1,0 +1,11 @@
+schema_version: 1
+data_version: 1
+service: delves
+season: pending_official_confirmation
+region: eu
+start_date: null
+reward_item_levels: {}
+crests: {}
+checked_at: null
+sources: []
+confirmation_status: unconfirmed
