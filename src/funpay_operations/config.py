@@ -39,6 +39,9 @@ class Settings:
     funpay_read_endpoints: tuple[tuple[str, str], ...] = ()
     telegram_enabled: bool = False
     telegram_long_poll_timeout_seconds: int = 25
+    telegram_notification_user_id: int | None = None
+    funpay_message_notifications_enabled: bool = False
+    funpay_message_poll_interval_seconds: int = 5
 
 
 def _mapping(value: Any, field: str) -> dict[str, Any]:
@@ -120,6 +123,11 @@ def load_settings(*, config_path: Path, env_path: Path) -> Settings:
     )
     if telegram_timeout > 50:
         raise ConfigurationError("telegram.long_poll_timeout_seconds must not exceed 50")
+    notification_user_id = telegram.get("notification_user_id")
+    if notification_user_id is not None and (
+        not isinstance(notification_user_id, int) or isinstance(notification_user_id, bool)
+    ):
+        raise ConfigurationError("telegram.notification_user_id must be an integer or null")
     hard_floor = lots.get("hard_floor")
     if hard_floor is not None:
         hard_floor = _positive_int(hard_floor, "lots.hard_floor")
@@ -145,6 +153,20 @@ def load_settings(*, config_path: Path, env_path: Path) -> Settings:
     if not isinstance(request_interval, (int, float)) or isinstance(request_interval, bool) or request_interval < 0:
         raise ConfigurationError("funpay.min_request_interval_seconds must be a non-negative number")
     retry_attempts = _positive_int(funpay.get("retry_attempts", 3), "funpay.retry_attempts")
+    message_notifications_enabled = _bool(
+        funpay.get("message_notifications_enabled", False), "funpay.message_notifications_enabled"
+    )
+    message_poll_interval = _positive_int(
+        funpay.get("message_poll_interval_seconds", 5), "funpay.message_poll_interval_seconds"
+    )
+    if message_poll_interval < request_interval:
+        raise ConfigurationError("funpay.message_poll_interval_seconds must respect the request interval")
+    if message_notifications_enabled and (
+        not telegram_enabled or notification_user_id is None or notification_user_id not in raw_allowed_users
+    ):
+        raise ConfigurationError(
+            "enabled FunPay message notifications require an enabled Telegram bot and allowlisted notification_user_id"
+        )
     return Settings(
         environment=str(app.get("environment", "development")),
         log_level=os.getenv("FUNPAY_MANAGER_LOG_LEVEL", str(app.get("log_level", "INFO"))).upper(),
@@ -168,4 +190,7 @@ def load_settings(*, config_path: Path, env_path: Path) -> Settings:
         funpay_read_endpoints=read_endpoints,
         telegram_enabled=telegram_enabled,
         telegram_long_poll_timeout_seconds=telegram_timeout,
+        telegram_notification_user_id=notification_user_id,
+        funpay_message_notifications_enabled=message_notifications_enabled,
+        funpay_message_poll_interval_seconds=message_poll_interval,
     )

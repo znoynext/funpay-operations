@@ -25,6 +25,10 @@ funpay:
   request_timeout_seconds: 15
   min_request_interval_seconds: 1.0
   retry_attempts: 3
+  # Reading remains disabled until both the local endpoint and Telegram target
+  # are explicitly configured below.
+  message_notifications_enabled: false
+  message_poll_interval_seconds: 5
 
 telegram:
   token_key: telegram_bot_token
@@ -32,6 +36,7 @@ telegram:
   # are entered in this ignored local configuration file.
   enabled: false
   long_poll_timeout_seconds: 25
+  notification_user_id: null
   allowed_user_ids: []
 
 lots:

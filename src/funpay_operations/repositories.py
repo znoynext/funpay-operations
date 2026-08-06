@@ -17,6 +17,12 @@ class OwnLot:
     description: str = ""
 
 
+@dataclass(frozen=True)
+class StoredFunPayMessage:
+    local_id: int
+    is_new: bool
+
+
 class TrustedSellerRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -119,6 +125,11 @@ class DialogRepository:
             return int(connection.execute("SELECT id FROM funpay_dialogs WHERE external_id = ?", (external_id,)).fetchone()["id"])
 
     def store_message(self, external_id: str, dialog_id: int, direction: str, body: str, sent_at: str) -> bool:
+        return self.store_message_with_id(external_id, dialog_id, direction, body, sent_at).is_new
+
+    def store_message_with_id(
+        self, external_id: str, dialog_id: int, direction: str, body: str, sent_at: str
+    ) -> StoredFunPayMessage:
         if direction not in {"incoming", "outgoing"} or not external_id.strip() or not sent_at.strip():
             raise ValueError("message id, direction, and timestamp are required")
         with self.database.session() as connection:
@@ -126,6 +137,35 @@ class DialogRepository:
                 """INSERT OR IGNORE INTO funpay_messages (external_id, dialog_id, direction, body, sent_at)
                 VALUES (?, ?, ?, ?, ?)""",
                 (external_id, dialog_id, direction, body, sent_at),
+            )
+            row = connection.execute(
+                "SELECT id FROM funpay_messages WHERE external_id = ?", (external_id,)
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("stored FunPay message could not be retrieved")
+            return StoredFunPayMessage(int(row["id"]), cursor.rowcount == 1)
+
+
+class TelegramMessageLinkRepository:
+    """Durable at-most-once delivery links; message bodies never leave SQLite here."""
+
+    def __init__(self, database: Database) -> None:
+        self.database = database
+
+    def is_linked(self, funpay_message_id: int) -> bool:
+        with self.database.session() as connection:
+            return connection.execute(
+                "SELECT 1 FROM telegram_message_links WHERE funpay_message_id = ?", (funpay_message_id,)
+            ).fetchone() is not None
+
+    def link(self, funpay_message_id: int, funpay_dialog_id: int, telegram_chat_id: int,
+             telegram_message_id: int) -> bool:
+        with self.database.session() as connection:
+            cursor = connection.execute(
+                """INSERT OR IGNORE INTO telegram_message_links
+                (funpay_message_id, funpay_dialog_id, telegram_chat_id, telegram_message_id)
+                VALUES (?, ?, ?, ?)""",
+                (funpay_message_id, funpay_dialog_id, telegram_chat_id, telegram_message_id),
             )
             return cursor.rowcount == 1
 

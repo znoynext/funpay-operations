@@ -49,7 +49,7 @@ class CommandReply:
 class TelegramBotApi(Protocol):
     def get_updates(self, offset: int | None, timeout_seconds: int) -> tuple[TelegramUpdate, ...]: ...
 
-    def send_message(self, chat_id: int, text: str, *, reply_markup: Mapping[str, Any] | None = None) -> None: ...
+    def send_message(self, chat_id: int, text: str, *, reply_markup: Mapping[str, Any] | None = None) -> int: ...
 
 
 class TaskStateStore(Protocol):
@@ -97,13 +97,16 @@ class TelegramHttpApi:
             raise TelegramProtocolError("Telegram getUpdates result is not an array")
         return tuple(parsed for item in result if (parsed := _parse_update(item)) is not None)
 
-    def send_message(self, chat_id: int, text: str, *, reply_markup: Mapping[str, Any] | None = None) -> None:
+    def send_message(self, chat_id: int, text: str, *, reply_markup: Mapping[str, Any] | None = None) -> int:
         if not text or len(text) > 4096:
             raise ValueError("Telegram reply text must be between 1 and 4096 characters")
         payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
         if reply_markup is not None:
             payload["reply_markup"] = dict(reply_markup)
-        self._call("sendMessage", payload, timeout_seconds=self._timeout_seconds)
+        result = self._call("sendMessage", payload, timeout_seconds=self._timeout_seconds)
+        if not isinstance(result, dict) or not _is_int(result.get("message_id")):
+            raise TelegramProtocolError("Telegram sendMessage result has no message identifier")
+        return int(result["message_id"])
 
     def _call(self, method: str, payload: Mapping[str, Any], *, timeout_seconds: int) -> Any:
         token = self._token_provider()
@@ -136,6 +139,10 @@ class TelegramCommandHandler:
         self._allowed_user_ids = frozenset(allowed_user_ids)
         self._states = states
         self._logger = logger
+
+    @property
+    def allowed_user_ids(self) -> frozenset[int]:
+        return self._allowed_user_ids
 
     def handle(self, update: TelegramUpdate) -> CommandReply | None:
         if update.user_id not in self._allowed_user_ids or update.chat_id != update.user_id:
@@ -218,6 +225,15 @@ class TelegramLongPollingBot:
                 self._states.save("telegram_polling", "stopped", str(update.update_id))
                 return
 
+    @property
+    def is_stopped(self) -> bool:
+        return self._stopped
+
+    def send_private_notification(self, recipient_id: int, text: str, reply_markup: Mapping[str, Any]) -> int:
+        if recipient_id not in self._handler.allowed_user_ids:
+            raise PermissionError("Telegram notification recipient is not allowlisted")
+        return self._api.send_message(recipient_id, text, reply_markup=reply_markup)
+
     def _restore_state(self) -> None:
         if self._state_restored:
             return
@@ -234,13 +250,17 @@ class MockTelegramApi:
     update_batches: list[tuple[TelegramUpdate, ...]] = field(default_factory=list)
     sent_messages: list[tuple[int, str, Mapping[str, Any] | None]] = field(default_factory=list)
     requested_offsets: list[int | None] = field(default_factory=list)
+    next_message_id: int = 1
 
     def get_updates(self, offset: int | None, timeout_seconds: int) -> tuple[TelegramUpdate, ...]:
         self.requested_offsets.append(offset)
         return self.update_batches.pop(0) if self.update_batches else ()
 
-    def send_message(self, chat_id: int, text: str, *, reply_markup: Mapping[str, Any] | None = None) -> None:
+    def send_message(self, chat_id: int, text: str, *, reply_markup: Mapping[str, Any] | None = None) -> int:
         self.sent_messages.append((chat_id, text, reply_markup))
+        message_id = self.next_message_id
+        self.next_message_id += 1
+        return message_id
 
 
 def build_telegram_bot(settings: Any, local_secret_store: Any, states: TaskStateStore,

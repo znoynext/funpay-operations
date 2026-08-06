@@ -69,6 +69,9 @@ class FunPayMessage:
     direction: str
     body: str
     sent_at: str | None
+    buyer_nickname: str | None = None
+    related_item: str | None = None
+    dialog_url: str | None = None
 
 
 class FunPayClient(Protocol):
@@ -228,6 +231,9 @@ class ReadOnlyFunPayHttpClient:
                 direction=_one_of(item, "direction", {"incoming", "outgoing"}),
                 body=_text(item, "body"),
                 sent_at=_optional_text(item, "sent_at"),
+                buyer_nickname=_optional_text(item, "buyer_nickname"),
+                related_item=_optional_text(item, "related_item"),
+                dialog_url=_optional_text(item, "dialog_url"),
             )
             for item in _items(
                 self._read_json("new_messages", after_message_id=after_message_id or ""), "messages"

@@ -69,6 +69,16 @@ local security log without message text or token values. `/start`, `/status`,
 The remaining menu commands reply that their corresponding FunPay module is not
 yet available. The token is never read by CI or stored in Git.
 
+## New FunPay-message notifications
+
+To enable notifications, configure an owner-verified `new_messages` endpoint,
+set `funpay.message_notifications_enabled: true`, and set
+`telegram.notification_user_id` to one of the allowlisted IDs in ignored local
+`config.yaml`. Each locally stored incoming message is linked to the resulting
+Telegram message and dialog before its cursor advances. Outgoing FunPay messages
+are not notified. Message content is stored only in the ignored SQLite database,
+never in repository files, CI logs, or artifacts.
+
 ## FunPay read integration
 
 FunPay does not provide a documented, stable public seller API contract. The

@@ -8,7 +8,8 @@ from .config import Settings, load_settings
 from .database import Database
 from .funpay import build_read_client
 from .logging_setup import configure_logging
-from .repositories import TaskStateRepository
+from .notifications import FunPayMessageNotifier
+from .repositories import DialogRepository, TaskStateRepository, TelegramMessageLinkRepository
 from .setup_wizard import SecretStore
 from .telegram import build_telegram_bot
 from .tasks import BackgroundRunner
@@ -27,8 +28,17 @@ class Application:
             settings, secret_store
         )
         self.telegram = build_telegram_bot(settings, secret_store, self.task_states, self.logger)
+        self.notifications = (
+            FunPayMessageNotifier(
+                self.funpay, self.telegram, DialogRepository(self.database), TelegramMessageLinkRepository(self.database),
+                self.task_states, settings.telegram_notification_user_id, self.logger,
+            )
+            if settings.funpay_message_notifications_enabled and settings.telegram_notification_user_id is not None
+            else None
+        )
         self.runner = BackgroundRunner(
-            settings, self.database, self.logger, funpay=self.funpay, telegram=self.telegram
+            settings, self.database, self.logger, funpay=self.funpay, telegram=self.telegram,
+            notifications=self.notifications,
         )
 
     @classmethod

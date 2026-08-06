@@ -130,6 +130,22 @@ MIGRATIONS: tuple[Migration, ...] = (
             "CREATE INDEX IF NOT EXISTS idx_messages_dialog ON funpay_messages(dialog_id, sent_at)",
         ),
     ),
+    (
+        2,
+        "telegram notification links",
+        (
+            """CREATE TABLE IF NOT EXISTS telegram_message_links (
+                id INTEGER PRIMARY KEY,
+                funpay_message_id INTEGER NOT NULL UNIQUE REFERENCES funpay_messages(id) ON DELETE CASCADE,
+                funpay_dialog_id INTEGER NOT NULL REFERENCES funpay_dialogs(id) ON DELETE CASCADE,
+                telegram_chat_id INTEGER NOT NULL,
+                telegram_message_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(telegram_chat_id, telegram_message_id)
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_telegram_links_dialog ON telegram_message_links(funpay_dialog_id)",
+        ),
+    ),
 )
 
 

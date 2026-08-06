@@ -98,3 +98,20 @@ operations:
             config.write_text("telegram:\n  long_poll_timeout_seconds: 51\n", encoding="utf-8")
             with self.assertRaises(ConfigurationError):
                 load_settings(config_path=config, env_path=root / ".env")
+
+    def test_requires_an_explicit_allowlisted_notification_recipient(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = root / "config.yaml"
+            config.write_text(
+                """funpay:
+  message_notifications_enabled: true
+telegram:
+  enabled: true
+  allowed_user_ids: [10]
+  notification_user_id: 11
+""",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ConfigurationError):
+                load_settings(config_path=config, env_path=root / ".env")
