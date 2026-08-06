@@ -42,6 +42,7 @@ class Settings:
     telegram_notification_user_id: int | None = None
     funpay_message_notifications_enabled: bool = False
     funpay_message_poll_interval_seconds: int = 5
+    funpay_reply_endpoint: str = ""
 
 
 def _mapping(value: Any, field: str) -> dict[str, Any]:
@@ -86,6 +87,14 @@ def _read_endpoints(value: Any) -> tuple[tuple[str, str], ...]:
             raise ConfigurationError(f"funpay.read_endpoints.{name} must be a relative path")
         result.append((name, path))
     return tuple(sorted(result))
+
+
+def _optional_relative_path(value: Any, field: str) -> str:
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, str) or not value.startswith("/") or "//" in value or ":" in value:
+        raise ConfigurationError(f"{field} must be an empty or relative path")
+    return value
 
 
 def load_settings(*, config_path: Path, env_path: Path) -> Settings:
@@ -153,6 +162,9 @@ def load_settings(*, config_path: Path, env_path: Path) -> Settings:
     if not isinstance(request_interval, (int, float)) or isinstance(request_interval, bool) or request_interval < 0:
         raise ConfigurationError("funpay.min_request_interval_seconds must be a non-negative number")
     retry_attempts = _positive_int(funpay.get("retry_attempts", 3), "funpay.retry_attempts")
+    reply_endpoint = _optional_relative_path(funpay.get("reply_endpoint", ""), "funpay.reply_endpoint")
+    if operations_enabled and not reply_endpoint:
+        raise ConfigurationError("live operations require funpay.reply_endpoint")
     message_notifications_enabled = _bool(
         funpay.get("message_notifications_enabled", False), "funpay.message_notifications_enabled"
     )
@@ -193,4 +205,5 @@ def load_settings(*, config_path: Path, env_path: Path) -> Settings:
         telegram_notification_user_id=notification_user_id,
         funpay_message_notifications_enabled=message_notifications_enabled,
         funpay_message_poll_interval_seconds=message_poll_interval,
+        funpay_reply_endpoint=reply_endpoint,
     )

@@ -79,6 +79,16 @@ Telegram message and dialog before its cursor advances. Outgoing FunPay messages
 are not notified. Message content is stored only in the ignored SQLite database,
 never in repository files, CI logs, or artifacts.
 
+## Buyer replies from Telegram
+
+Reply directly to a notification or choose its **Reply** button and send the
+next private Telegram message within five minutes. The application resolves the
+dialog only from its local notification link, checks the recorded buyer, and
+records an idempotency key before a send. On failure it exposes Retry and Cancel
+buttons. Actual FunPay sends remain disabled until the local configuration is in
+`live` mode and has an owner-verified `funpay.reply_endpoint` that honours the
+idempotency key; CI uses no such configuration or session.
+
 ## FunPay read integration
 
 FunPay does not provide a documented, stable public seller API contract. The

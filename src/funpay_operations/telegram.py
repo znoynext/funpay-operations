@@ -37,6 +37,8 @@ class TelegramUpdate:
     user_id: int
     chat_id: int
     text: str | None
+    reply_to_message_id: int | None = None
+    callback_data: str | None = None
 
 
 @dataclass(frozen=True)
@@ -44,6 +46,7 @@ class CommandReply:
     text: str
     show_menu: bool = False
     stop_polling: bool = False
+    reply_markup: Mapping[str, Any] | None = None
 
 
 class TelegramBotApi(Protocol):
@@ -56,6 +59,10 @@ class TaskStateStore(Protocol):
     def save(self, task_name: str, state: str, cursor: str | None = None, last_error: str | None = None) -> None: ...
 
     def load(self, task_name: str) -> tuple[str, str | None] | None: ...
+
+
+class TelegramInteractionRouter(Protocol):
+    def handle(self, update: TelegramUpdate) -> CommandReply | None: ...
 
 
 MAIN_MENU: Mapping[str, Any] = {
@@ -90,7 +97,7 @@ class TelegramHttpApi:
             raise ValueError("long polling timeout must be between 1 and 50 seconds")
         result = self._call(
             "getUpdates",
-            {"offset": offset, "timeout": timeout_seconds, "allowed_updates": ["message"]},
+            {"offset": offset, "timeout": timeout_seconds, "allowed_updates": ["message", "callback_query"]},
             timeout_seconds=timeout_seconds + 10,
         )
         if not isinstance(result, list):
@@ -193,6 +200,10 @@ class TelegramLongPollingBot:
         self._offset: int | None = None
         self._stopped = False
         self._state_restored = False
+        self._interaction_router: TelegramInteractionRouter | None = None
+
+    def set_interaction_router(self, router: TelegramInteractionRouter) -> None:
+        self._interaction_router = router
 
     def poll_once(self) -> None:
         self._restore_state()
@@ -209,11 +220,16 @@ class TelegramLongPollingBot:
         for update in sorted(updates, key=lambda item: item.update_id):
             if self._offset is not None and update.update_id < self._offset:
                 continue
-            reply = self._handler.handle(update)
+            reply = self._interaction_router.handle(update) if self._interaction_router is not None else None
+            if reply is None:
+                reply = self._handler.handle(update)
             if reply is not None:
                 try:
                     self._api.send_message(
-                        update.chat_id, reply.text, reply_markup=MAIN_MENU if reply.show_menu else None
+                        update.chat_id, reply.text,
+                        reply_markup=reply.reply_markup if reply.reply_markup is not None else (
+                            MAIN_MENU if reply.show_menu else None
+                        ),
                     )
                 except TelegramError:
                     self._logger.warning("Telegram reply could not be sent; update will be retried")
@@ -277,17 +293,37 @@ def _parse_update(value: Any) -> TelegramUpdate | None:
     if not isinstance(value, dict) or not _is_int(value.get("update_id")):
         raise TelegramProtocolError("Telegram update has an invalid identifier")
     message = value.get("message")
-    if not isinstance(message, dict):
+    if isinstance(message, dict):
+        parsed = _parse_message(value["update_id"], message)
+        if parsed is None:
+            return None
+        user_id, chat_id, text, reply_to_message_id = parsed
+        return TelegramUpdate(value["update_id"], user_id, chat_id, text, reply_to_message_id)
+    callback = value.get("callback_query")
+    if not isinstance(callback, dict) or not isinstance(callback.get("message"), dict):
         return None
-    sender = message.get("from")
+    parsed = _parse_message(value["update_id"], callback["message"], sender=callback.get("from"))
+    if parsed is None or not isinstance(callback.get("data"), str):
+        return None
+    user_id, chat_id, _, message_id = parsed
+    return TelegramUpdate(value["update_id"], user_id, chat_id, None, message_id, callback["data"])
+
+
+def _parse_message(update_id: int, message: Mapping[str, Any], *, sender: Any | None = None) -> tuple[int, int, str | None, int | None] | None:
+    del update_id
+    sender = sender if sender is not None else message.get("from")
     chat = message.get("chat")
     if not isinstance(sender, dict) or not isinstance(chat, dict):
         return None
     user_id, chat_id = sender.get("id"), chat.get("id")
     if not _is_int(user_id) or not _is_int(chat_id):
         return None
+    reply_to = message.get("reply_to_message")
+    reply_to_message_id = reply_to.get("message_id") if isinstance(reply_to, dict) else None
+    if reply_to_message_id is not None and not _is_int(reply_to_message_id):
+        return None
     text = message.get("text")
-    return TelegramUpdate(value["update_id"], user_id, chat_id, text if isinstance(text, str) else None)
+    return user_id, chat_id, text if isinstance(text, str) else None, reply_to_message_id
 
 
 def _command_from_text(text: str | None) -> str | None:

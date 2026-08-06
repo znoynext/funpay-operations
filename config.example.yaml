@@ -29,6 +29,9 @@ funpay:
   # are explicitly configured below.
   message_notifications_enabled: false
   message_poll_interval_seconds: 5
+  # Required only for local live mode; this owner-verified endpoint must honour
+  # the idempotency_key field used for buyer replies.
+  reply_endpoint: ""
 
 telegram:
   token_key: telegram_bot_token

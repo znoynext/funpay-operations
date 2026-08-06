@@ -38,6 +38,12 @@ class FunPayProtocolError(FunPayError):
     """The configured endpoint or its response does not match the adapter."""
 
 
+class FunPayReplyClient(Protocol):
+    """Explicitly enabled state-changing boundary for buyer replies."""
+
+    def send_reply(self, dialog_id: str, buyer_nickname: str, body: str, idempotency_key: str) -> None: ...
+
+
 @dataclass(frozen=True)
 class FunPayProfile:
     account_id: str
@@ -90,6 +96,51 @@ class FunPayClient(Protocol):
     def get_new_messages(self, after_message_id: str | None = None) -> tuple[FunPayMessage, ...]: ...
 
     def check_bump_availability(self, lot_id: str) -> bool: ...
+
+
+class DisabledFunPayReplyClient:
+    """Safe default: no FunPay write request can leave the process."""
+
+    def send_reply(self, dialog_id: str, buyer_nickname: str, body: str, idempotency_key: str) -> None:
+        raise RealOperationsDisabled("FunPay replies require local live-mode configuration")
+
+
+class ConfiguredFunPayReplyClient:
+    """Owner-configured POST adapter. The endpoint must honour idempotency_key."""
+
+    def __init__(self, session_provider: Callable[[], str | None], reply_endpoint: str, *, timeout_seconds: int) -> None:
+        if not reply_endpoint.startswith("/") or "//" in reply_endpoint or ":" in reply_endpoint:
+            raise ValueError("reply_endpoint must be a relative path")
+        self._session_provider = session_provider
+        self._reply_endpoint = reply_endpoint
+        self._timeout_seconds = timeout_seconds
+
+    def send_reply(self, dialog_id: str, buyer_nickname: str, body: str, idempotency_key: str) -> None:
+        if not all((dialog_id.strip(), buyer_nickname.strip(), body.strip(), idempotency_key.strip())):
+            raise ValueError("dialog, buyer, reply body, and idempotency key are required")
+        session = self._session_provider()
+        if not session or "\r" in session or "\n" in session:
+            raise FunPaySessionExpired("FunPay session is unavailable locally")
+        request = Request(
+            "https://funpay.com" + self._reply_endpoint,
+            data=json.dumps({
+                "dialog_id": dialog_id, "buyer_nickname": buyer_nickname, "body": body,
+                "idempotency_key": idempotency_key,
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Accept": "application/json", "Cookie": f"golden_key={session}"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=self._timeout_seconds) as response:  # noqa: S310 - fixed HTTPS FunPay host
+                status_code = response.status
+        except HTTPError as error:
+            if error.code in {401, 403}:
+                raise FunPaySessionExpired("FunPay session was rejected or expired") from error
+            raise FunPayProtocolError("FunPay reply endpoint rejected the request") from error
+        except (OSError, socket.timeout, URLError) as error:
+            raise FunPayNetworkUnavailable("FunPay reply endpoint is unavailable") from error
+        if not 200 <= status_code < 300:
+            raise FunPayProtocolError("FunPay reply endpoint rejected the request")
 
 
 @dataclass(frozen=True)
@@ -419,5 +470,17 @@ def build_read_client(settings: Any, local_secret_store: Any) -> ReadOnlyFunPayH
         endpoints=ReadEndpoints(**dict(settings.funpay_read_endpoints)),
         retry_policy=RetryPolicy(max_attempts=settings.funpay_retry_attempts),
         rate_limiter=RequestRateLimiter(settings.funpay_min_request_interval_seconds),
+        timeout_seconds=settings.funpay_request_timeout_seconds,
+    )
+
+
+def build_reply_client(settings: Any, local_secret_store: Any) -> FunPayReplyClient:
+    """Return a write client only after explicit local live-mode opt-in."""
+
+    if not settings.operations_enabled or settings.operation_mode != "live" or not settings.funpay_reply_endpoint:
+        return DisabledFunPayReplyClient()
+    return ConfiguredFunPayReplyClient(
+        session_from_local_store(local_secret_store, settings.funpay_credential_key),
+        settings.funpay_reply_endpoint,
         timeout_seconds=settings.funpay_request_timeout_seconds,
     )

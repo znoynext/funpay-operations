@@ -6,10 +6,11 @@ from pathlib import Path
 
 from .config import Settings, load_settings
 from .database import Database
-from .funpay import build_read_client
+from .funpay import build_read_client, build_reply_client
 from .logging_setup import configure_logging
 from .notifications import FunPayMessageNotifier
-from .repositories import DialogRepository, TaskStateRepository, TelegramMessageLinkRepository
+from .replies import FunPayReplyRouter
+from .repositories import DialogRepository, ReplyRepository, TaskStateRepository, TelegramMessageLinkRepository
 from .setup_wizard import SecretStore
 from .telegram import build_telegram_bot
 from .tasks import BackgroundRunner
@@ -27,7 +28,14 @@ class Application:
         self.funpay = build_read_client(
             settings, secret_store
         )
+        self.funpay_replies = build_reply_client(settings, secret_store)
         self.telegram = build_telegram_bot(settings, secret_store, self.task_states, self.logger)
+        self.telegram.set_interaction_router(
+            FunPayReplyRouter(
+                settings.allowed_telegram_user_ids, TelegramMessageLinkRepository(self.database),
+                ReplyRepository(self.database), self.funpay_replies,
+            )
+        )
         self.notifications = (
             FunPayMessageNotifier(
                 self.funpay, self.telegram, DialogRepository(self.database), TelegramMessageLinkRepository(self.database),

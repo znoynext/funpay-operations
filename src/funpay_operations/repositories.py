@@ -23,6 +23,25 @@ class StoredFunPayMessage:
     is_new: bool
 
 
+@dataclass(frozen=True)
+class ReplyTarget:
+    local_dialog_id: int
+    external_dialog_id: str
+    buyer_nickname: str
+
+
+@dataclass(frozen=True)
+class ReplyAttempt:
+    attempt_id: int
+    telegram_update_id: int
+    telegram_chat_id: int
+    telegram_user_id: int
+    target: ReplyTarget
+    body: str
+    idempotency_key: str
+    state: str
+
+
 class TrustedSellerRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -168,6 +187,124 @@ class TelegramMessageLinkRepository:
                 (funpay_message_id, funpay_dialog_id, telegram_chat_id, telegram_message_id),
             )
             return cursor.rowcount == 1
+
+    def target_for_notification(self, telegram_chat_id: int, telegram_message_id: int) -> ReplyTarget | None:
+        with self.database.session() as connection:
+            row = connection.execute(
+                """SELECT d.id, d.external_id, d.counterparty_name
+                FROM telegram_message_links link JOIN funpay_dialogs d ON d.id = link.funpay_dialog_id
+                WHERE link.telegram_chat_id = ? AND link.telegram_message_id = ?""",
+                (telegram_chat_id, telegram_message_id),
+            ).fetchone()
+        return _reply_target(row)
+
+    def target_for_dialog(self, telegram_chat_id: int, local_dialog_id: int) -> ReplyTarget | None:
+        with self.database.session() as connection:
+            row = connection.execute(
+                """SELECT d.id, d.external_id, d.counterparty_name
+                FROM telegram_message_links link JOIN funpay_dialogs d ON d.id = link.funpay_dialog_id
+                WHERE link.telegram_chat_id = ? AND d.id = ?
+                ORDER BY link.id DESC LIMIT 1""",
+                (telegram_chat_id, local_dialog_id),
+            ).fetchone()
+        return _reply_target(row)
+
+
+class ReplyRepository:
+    """Durable pending-reply and idempotent-send state, including reply bodies locally only."""
+
+    def __init__(self, database: Database) -> None:
+        self.database = database
+
+    def arm_mode(self, user_id: int, chat_id: int, target: ReplyTarget, expires_at_epoch: int) -> None:
+        with self.database.session() as connection:
+            connection.execute(
+                """INSERT INTO telegram_reply_modes
+                (telegram_chat_id, telegram_user_id, funpay_dialog_id, buyer_nickname, expires_at_epoch)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(telegram_chat_id) DO UPDATE SET telegram_user_id = excluded.telegram_user_id,
+                    funpay_dialog_id = excluded.funpay_dialog_id, buyer_nickname = excluded.buyer_nickname,
+                    expires_at_epoch = excluded.expires_at_epoch""",
+                (chat_id, user_id, target.local_dialog_id, target.buyer_nickname, expires_at_epoch),
+            )
+
+    def consume_mode(self, user_id: int, chat_id: int, now_epoch: int) -> ReplyTarget | None:
+        with self.database.session() as connection:
+            row = connection.execute(
+                """SELECT mode.funpay_dialog_id, d.external_id, mode.buyer_nickname, mode.expires_at_epoch
+                FROM telegram_reply_modes mode JOIN funpay_dialogs d ON d.id = mode.funpay_dialog_id
+                WHERE mode.telegram_chat_id = ? AND mode.telegram_user_id = ?""",
+                (chat_id, user_id),
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute("DELETE FROM telegram_reply_modes WHERE telegram_chat_id = ?", (chat_id,))
+        if int(row["expires_at_epoch"]) < now_epoch:
+            return None
+        return ReplyTarget(int(row["funpay_dialog_id"]), row["external_id"], row["buyer_nickname"])
+
+    def create_attempt(self, telegram_update_id: int, user_id: int, chat_id: int,
+                       target: ReplyTarget, body: str) -> ReplyAttempt:
+        key = f"telegram-update-{telegram_update_id}"
+        with self.database.session() as connection:
+            connection.execute(
+                """INSERT OR IGNORE INTO funpay_reply_attempts
+                (telegram_update_id, telegram_chat_id, telegram_user_id, funpay_dialog_id, buyer_nickname,
+                 body, idempotency_key, state)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'sending')""",
+                (telegram_update_id, chat_id, user_id, target.local_dialog_id, target.buyer_nickname, body, key),
+            )
+            row = connection.execute(
+                """SELECT attempt.*, dialog.external_id AS external_dialog_id
+                FROM funpay_reply_attempts attempt JOIN funpay_dialogs dialog ON dialog.id = attempt.funpay_dialog_id
+                WHERE attempt.telegram_update_id = ?""",
+                (telegram_update_id,),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("reply attempt could not be retrieved")
+        return _reply_attempt(row)
+
+    def claim_retry(self, attempt_id: int, user_id: int, chat_id: int) -> ReplyAttempt | None:
+        with self.database.session() as connection:
+            cursor = connection.execute(
+                """UPDATE funpay_reply_attempts SET state = 'sending', updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND telegram_user_id = ? AND telegram_chat_id = ? AND state = 'failed'""",
+                (attempt_id, user_id, chat_id),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = connection.execute(
+                """SELECT attempt.*, dialog.external_id AS external_dialog_id
+                FROM funpay_reply_attempts attempt JOIN funpay_dialogs dialog ON dialog.id = attempt.funpay_dialog_id
+                WHERE attempt.id = ?""",
+                (attempt_id,),
+            ).fetchone()
+        return _reply_attempt(row)
+
+    def mark(self, attempt_id: int, state: str) -> None:
+        if state not in {"sent", "failed", "cancelled"}:
+            raise ValueError("invalid reply state")
+        with self.database.session() as connection:
+            connection.execute(
+                "UPDATE funpay_reply_attempts SET state = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (state, attempt_id),
+            )
+
+
+def _reply_target(row: object) -> ReplyTarget | None:
+    if row is None or not row["external_id"] or not row["counterparty_name"]:
+        return None
+    return ReplyTarget(int(row["id"]), row["external_id"], row["counterparty_name"])
+
+
+def _reply_attempt(row: object) -> ReplyAttempt:
+    if row is None:
+        raise RuntimeError("reply attempt is missing")
+    return ReplyAttempt(
+        int(row["id"]), int(row["telegram_update_id"]), int(row["telegram_chat_id"]), int(row["telegram_user_id"]),
+        ReplyTarget(int(row["funpay_dialog_id"]), row["external_dialog_id"], row["buyer_nickname"]),
+        row["body"], row["idempotency_key"], row["state"],
+    )
 
 
 class EventRepository:

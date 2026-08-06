@@ -115,3 +115,11 @@ telegram:
             )
             with self.assertRaises(ConfigurationError):
                 load_settings(config_path=config, env_path=root / ".env")
+
+    def test_live_operations_require_an_owner_verified_reply_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = root / "config.yaml"
+            config.write_text("operations:\n  mode: live\n  enabled: true\n", encoding="utf-8")
+            with self.assertRaises(ConfigurationError):
+                load_settings(config_path=config, env_path=root / ".env")
