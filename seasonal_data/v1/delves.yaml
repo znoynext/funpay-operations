@@ -1,0 +1,13 @@
+schema_version: 1
+data_version: 1
+service: delves
+season: midnight_season_2_pending
+region: eu
+start_date: null
+reward_item_levels: {}
+crests: {}
+checked_at: 2026-08-08
+sources:
+  - https://worldofwarcraft.blizzard.com/en-us/news/24280285
+  - https://worldofwarcraft.blizzard.com/en-us/news/24266321/midnight-season-1-has-begun
+confirmation_status: unconfirmed
