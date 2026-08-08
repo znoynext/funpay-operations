@@ -32,6 +32,8 @@ funpay:
   # Required only for local live mode; this owner-verified endpoint must honour
   # the idempotency_key field used for buyer replies.
   reply_endpoint: ""
+  # Telegram can override this locally after live mode is enabled.
+  auto_reply_enabled: false
 
 telegram:
   token_key: telegram_bot_token

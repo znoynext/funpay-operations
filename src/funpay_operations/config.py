@@ -43,6 +43,7 @@ class Settings:
     funpay_message_notifications_enabled: bool = False
     funpay_message_poll_interval_seconds: int = 5
     funpay_reply_endpoint: str = ""
+    funpay_auto_reply_enabled: bool = False
 
 
 def _mapping(value: Any, field: str) -> dict[str, Any]:
@@ -173,6 +174,7 @@ def load_settings(*, config_path: Path, env_path: Path) -> Settings:
     )
     if message_poll_interval < request_interval:
         raise ConfigurationError("funpay.message_poll_interval_seconds must respect the request interval")
+    auto_reply_enabled = _bool(funpay.get("auto_reply_enabled", False), "funpay.auto_reply_enabled")
     if message_notifications_enabled and (
         not telegram_enabled or notification_user_id is None or notification_user_id not in raw_allowed_users
     ):
@@ -206,4 +208,5 @@ def load_settings(*, config_path: Path, env_path: Path) -> Settings:
         funpay_message_notifications_enabled=message_notifications_enabled,
         funpay_message_poll_interval_seconds=message_poll_interval,
         funpay_reply_endpoint=reply_endpoint,
+        funpay_auto_reply_enabled=auto_reply_enabled,
     )

@@ -31,7 +31,7 @@ class DatabaseTests(unittest.TestCase):
         with self.database.session() as connection:
             connection.execute("INSERT INTO lots (external_id, title, price_minor, currency) VALUES (?, ?, ?, ?)", ("legacy", "Legacy", 1, "RUB"))
         self.database.apply_migrations()
-        self.assertEqual(self.database.applied_migrations(), (1, 2, 3))
+        self.assertEqual(self.database.applied_migrations(), (1, 2, 3, 4))
         with self.database.session() as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM lots").fetchone()[0], 1)
 

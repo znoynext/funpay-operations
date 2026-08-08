@@ -5,12 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from .config import Settings, load_settings
+from .auto_reply import AutoReplyService
 from .database import Database
 from .funpay import build_read_client, build_reply_client
 from .logging_setup import configure_logging
 from .notifications import FunPayMessageNotifier
 from .replies import FunPayReplyRouter
-from .repositories import DialogRepository, ReplyRepository, TaskStateRepository, TelegramMessageLinkRepository
+from .repositories import AutoReplyRepository, DialogRepository, ReplyRepository, TaskStateRepository, TelegramMessageLinkRepository
 from .setup_wizard import SecretStore
 from .telegram import build_telegram_bot
 from .tasks import BackgroundRunner
@@ -36,10 +37,14 @@ class Application:
                 ReplyRepository(self.database), self.funpay_replies,
             )
         )
+        self.auto_replies = AutoReplyService(
+            self.funpay_replies, AutoReplyRepository(self.database), self.task_states, self.logger,
+            default_enabled=settings.funpay_auto_reply_enabled,
+        )
         self.notifications = (
             FunPayMessageNotifier(
                 self.funpay, self.telegram, DialogRepository(self.database), TelegramMessageLinkRepository(self.database),
-                self.task_states, settings.telegram_notification_user_id, self.logger,
+                self.task_states, settings.telegram_notification_user_id, self.logger, self.auto_replies,
             )
             if settings.funpay_message_notifications_enabled and settings.telegram_notification_user_id is not None
             else None

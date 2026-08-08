@@ -87,3 +87,12 @@ class TelegramBotTests(unittest.TestCase):
 
         self.assertEqual(self.api.requested_offsets, [12])
         self.assertEqual(self.states.load("telegram_polling"), ("running", "12"))
+
+    def test_auto_reply_commands_are_allowlisted_and_persist_state(self) -> None:
+        handler = TelegramCommandHandler((1001,), self.states, self.logger, auto_reply_available=True)
+        enabled = handler.handle(self.update(1, "/auto_reply_on"))
+        disabled = handler.handle(self.update(2, "/auto_reply_off"))
+
+        self.assertEqual(enabled.text, "Автоответ включен.")
+        self.assertEqual(disabled.text, "Автоответ выключен.")
+        self.assertEqual(self.states.load("funpay_auto_reply"), ("disabled", None))

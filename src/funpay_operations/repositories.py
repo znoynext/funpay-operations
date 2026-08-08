@@ -42,6 +42,13 @@ class ReplyAttempt:
     state: str
 
 
+@dataclass(frozen=True)
+class AutoReplyAttempt:
+    attempt_id: int
+    target: ReplyTarget
+    idempotency_key: str
+
+
 class TrustedSellerRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -287,6 +294,40 @@ class ReplyRepository:
         with self.database.session() as connection:
             connection.execute(
                 "UPDATE funpay_reply_attempts SET state = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (state, attempt_id),
+            )
+
+
+class AutoReplyRepository:
+    """Local idempotency ledger for the exact automatic greeting text."""
+
+    def __init__(self, database: Database) -> None:
+        self.database = database
+
+    def claim(self, local_message_id: int, target: ReplyTarget, trigger_sent_at: str) -> AutoReplyAttempt | None:
+        with self.database.session() as connection:
+            cursor = connection.execute(
+                """INSERT OR IGNORE INTO funpay_auto_replies
+                (trigger_funpay_message_id, funpay_dialog_id, trigger_sent_at, idempotency_key, state)
+                VALUES (?, ?, ?, ?, 'sending')""",
+                (local_message_id, target.local_dialog_id, trigger_sent_at, f"auto-reply-{local_message_id}"),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = connection.execute(
+                "SELECT id, idempotency_key FROM funpay_auto_replies WHERE trigger_funpay_message_id = ?",
+                (local_message_id,),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("automatic reply attempt could not be retrieved")
+        return AutoReplyAttempt(int(row["id"]), target, row["idempotency_key"])
+
+    def mark(self, attempt_id: int, state: str) -> None:
+        if state not in {"sent", "failed"}:
+            raise ValueError("invalid automatic reply state")
+        with self.database.session() as connection:
+            connection.execute(
+                "UPDATE funpay_auto_replies SET state = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (state, attempt_id),
             )
 

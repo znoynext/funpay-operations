@@ -89,6 +89,18 @@ buttons. Actual FunPay sends remain disabled until the local configuration is in
 `live` mode and has an owner-verified `funpay.reply_endpoint` that honours the
 idempotency key; CI uses no such configuration or session.
 
+## Automatic first reply
+
+The automatic greeting is disabled by default. In a locally configured `live`
+mode it can be toggled by an allowlisted owner with `/auto_reply_on` and
+`/auto_reply_off`. When enabled, it sends the exact text `Привет` at most once
+for the first newly observed buyer message in each dialog. The startup
+synchronization is deliberately treated as history, so existing dialogs never
+receive a greeting. Owner messages and duplicate or later incoming events never
+trigger another greeting, including after periods of inactivity or an
+application restart. Telegram notification delivery precedes the automatic reply
+and remains available even if that reply fails.
+
 ## FunPay read integration
 
 FunPay does not provide a documented, stable public seller API contract. The

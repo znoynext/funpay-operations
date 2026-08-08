@@ -72,6 +72,7 @@ MAIN_MENU: Mapping[str, Any] = {
         ["/lots", "/sellers"],
         ["/messages", "/rollback"],
         ["/update_prices", "/raise"],
+        ["/auto_reply_on", "/auto_reply_off"],
         ["/stop"],
     ],
     "resize_keyboard": True,
@@ -142,10 +143,12 @@ class TelegramHttpApi:
 class TelegramCommandHandler:
     """Authorizes private commands and keeps commands outside its scope inert."""
 
-    def __init__(self, allowed_user_ids: tuple[int, ...], states: TaskStateStore, logger: logging.Logger) -> None:
+    def __init__(self, allowed_user_ids: tuple[int, ...], states: TaskStateStore, logger: logging.Logger,
+                 *, auto_reply_available: bool = False) -> None:
         self._allowed_user_ids = frozenset(allowed_user_ids)
         self._states = states
         self._logger = logger
+        self._auto_reply_available = auto_reply_available
 
     @property
     def allowed_user_ids(self) -> frozenset[int]:
@@ -157,7 +160,8 @@ class TelegramCommandHandler:
             return None
         command = _command_from_text(update.text)
         if command is None or command not in _UNAVAILABLE_COMMANDS | {
-            "/start", "/status", "/pause", "/resume", "/stop"
+            "/start", "/status", "/pause", "/resume", "/stop",
+            "/auto_reply_on", "/auto_reply_off",
         }:
             self._security_rejection("unknown command", update)
             return CommandReply("Команда недоступна.", show_menu=True)
@@ -175,6 +179,11 @@ class TelegramCommandHandler:
         if command == "/stop":
             self._states.save("telegram_bot", "stopped")
             return CommandReply("Long polling остановлен.", stop_polling=True)
+        if command in {"/auto_reply_on", "/auto_reply_off"}:
+            if not self._auto_reply_available:
+                return CommandReply("Автоответ недоступен: локальный live-режим выключен.", show_menu=True)
+            self._states.save("funpay_auto_reply", "enabled" if command.endswith("_on") else "disabled")
+            return CommandReply("Автоответ включен." if command.endswith("_on") else "Автоответ выключен.", show_menu=True)
         return CommandReply("Функция пока недоступна.", show_menu=True)
 
     def _security_rejection(self, reason: str, update: TelegramUpdate) -> None:
@@ -285,7 +294,10 @@ def build_telegram_bot(settings: Any, local_secret_store: Any, states: TaskState
 
     token_provider = lambda: local_secret_store.get(settings.telegram_token_key)
     api = TelegramHttpApi(token_provider, timeout_seconds=settings.telegram_long_poll_timeout_seconds + 10)
-    handler = TelegramCommandHandler(settings.allowed_telegram_user_ids, states, logger)
+    handler = TelegramCommandHandler(
+        settings.allowed_telegram_user_ids, states, logger,
+        auto_reply_available=settings.operations_enabled and bool(settings.funpay_reply_endpoint),
+    )
     return TelegramLongPollingBot(api, handler, states, logger, timeout_seconds=settings.telegram_long_poll_timeout_seconds)
 
 
