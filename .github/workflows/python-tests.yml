@@ -15,32 +15,60 @@ permissions:
 jobs:
   compile:
     name: Python compile
-    if: ${{ hashFiles('pyproject.toml') != '' && hashFiles('src/**') != '' && hashFiles('tests/**') != '' }}
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Detect Python project
+        id: project
+        shell: bash
+        run: |
+          if [[ -f pyproject.toml && -d src && -d tests ]]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Skip because no Python project exists yet
+        if: steps.project.outputs.present != 'true'
+        run: echo "No Python project is present in this revision."
       - name: Set up Python
+        if: steps.project.outputs.present == 'true'
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
       - name: Install package
+        if: steps.project.outputs.present == 'true'
         run: python -m pip install .
       - name: Compile source and tests
+        if: steps.project.outputs.present == 'true'
         run: python -m compileall -q src tests
 
   unit-tests:
     name: Python unit tests
-    if: ${{ hashFiles('pyproject.toml') != '' && hashFiles('src/**') != '' && hashFiles('tests/**') != '' }}
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Detect Python project
+        id: project
+        shell: bash
+        run: |
+          if [[ -f pyproject.toml && -d src && -d tests ]]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Skip because no Python project exists yet
+        if: steps.project.outputs.present != 'true'
+        run: echo "No Python project is present in this revision."
       - name: Set up Python
+        if: steps.project.outputs.present == 'true'
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
       - name: Install package
+        if: steps.project.outputs.present == 'true'
         run: python -m pip install .
       - name: Run unit tests
+        if: steps.project.outputs.present == 'true'
         run: python -m unittest discover -s tests -v
