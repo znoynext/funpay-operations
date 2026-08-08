@@ -93,12 +93,13 @@ idempotency key; CI uses no such configuration or session.
 
 The automatic greeting is disabled by default. In a locally configured `live`
 mode it can be toggled by an allowlisted owner with `/auto_reply_on` and
-`/auto_reply_off`. When enabled, it sends the exact text `Привет` once for the
-first newly observed buyer message in a dialog, or once after the configured
-inactive interval. The startup synchronization is deliberately treated as
-history, so existing dialogs never receive a greeting. Owner messages, active
-dialogs, and duplicate events do not trigger it. Telegram notification delivery
-precedes the automatic reply and remains available even if that reply fails.
+`/auto_reply_off`. When enabled, it sends the exact text `Привет` at most once
+for the first newly observed buyer message in each dialog. The startup
+synchronization is deliberately treated as history, so existing dialogs never
+receive a greeting. Owner messages and duplicate or later incoming events never
+trigger another greeting, including after periods of inactivity or an
+application restart. Telegram notification delivery precedes the automatic reply
+and remains available even if that reply fails.
 
 ## FunPay read integration
 

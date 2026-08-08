@@ -53,7 +53,6 @@ class AutoReplyTests(unittest.TestCase):
         self.auto = AutoReplyService(
             self.replies, AutoReplyRepository(self.database), self.states,
             logging.getLogger("funpay_operations.auto_reply.tests"), default_enabled=True,
-            inactive_after_seconds=3600,
         )
         self.notifier = FunPayMessageNotifier(
             self.inbox, self.telegram, DialogRepository(self.database), TelegramMessageLinkRepository(self.database),
@@ -85,17 +84,35 @@ class AutoReplyTests(unittest.TestCase):
         self.assertEqual(self.replies.calls, [("new-dialog", "Buyer", "Привет", "auto-reply-1")])
         self.assertEqual(self.replies.calls[0][2], AUTO_REPLY_TEXT)
 
-    def test_active_dialog_and_owner_reply_do_not_trigger_greeting(self) -> None:
+    def test_multiple_incoming_messages_in_one_dialog_never_repeat_greeting(self) -> None:
         self.notifier.sync()
         self.inbox.messages = (self.message("m1", "dialog", "incoming", "2026-08-06T10:00:00Z"),)
         self.notifier.sync()
-        self.inbox.messages = (self.message("m2", "dialog", "outgoing", "2026-08-06T10:05:00Z"),)
+        self.inbox.messages = (self.message("m2", "dialog", "incoming", "2026-08-08T10:00:00Z"),)
         self.notifier.sync()
-        self.inbox.messages = (self.message("m3", "dialog", "incoming", "2026-08-06T10:10:00Z"),)
+        self.inbox.messages = (self.message("m3", "dialog", "incoming", "2026-08-12T10:00:00Z"),)
         self.notifier.sync()
 
         self.assertEqual(len(self.replies.calls), 1)
         self.assertEqual(self.replies.calls[0][0], "dialog")
+
+    def test_restart_does_not_reset_dialog_greeting_state(self) -> None:
+        self.notifier.sync()
+        self.inbox.messages = (self.message("m1", "dialog", "incoming", "2026-08-06T10:00:00Z"),)
+        self.notifier.sync()
+
+        restarted_auto = AutoReplyService(
+            self.replies, AutoReplyRepository(self.database), self.states,
+            logging.getLogger("funpay_operations.auto_reply.tests"), default_enabled=True,
+        )
+        restarted_notifier = FunPayMessageNotifier(
+            self.inbox, self.telegram, DialogRepository(self.database), TelegramMessageLinkRepository(self.database),
+            self.states, 1001, logging.getLogger("funpay_operations.auto_reply.tests"), restarted_auto,
+        )
+        self.inbox.messages = (self.message("m2", "dialog", "incoming", "2026-08-10T10:00:00Z"),)
+        restarted_notifier.sync()
+
+        self.assertEqual(len(self.replies.calls), 1)
 
     def test_owner_message_never_triggers_greeting(self) -> None:
         self.notifier.sync()
@@ -104,16 +121,6 @@ class AutoReplyTests(unittest.TestCase):
 
         self.assertEqual(self.telegram.notifications, [])
         self.assertEqual(self.replies.calls, [])
-
-    def test_inactive_dialog_greets_once_again_after_interval(self) -> None:
-        self.notifier.sync()
-        self.inbox.messages = (self.message("m1", "dialog", "incoming", "2026-08-06T10:00:00Z"),)
-        self.notifier.sync()
-        self.inbox.messages = (self.message("m2", "dialog", "incoming", "2026-08-06T12:00:00Z"),)
-        self.notifier.sync()
-
-        self.assertEqual([call[2] for call in self.replies.calls], ["Привет", "Привет"])
-        self.assertEqual(len({call[3] for call in self.replies.calls}), 2)
 
     def test_telegram_notification_does_not_depend_on_auto_reply_success(self) -> None:
         self.notifier.sync()

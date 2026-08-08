@@ -34,7 +34,6 @@ funpay:
   reply_endpoint: ""
   # Telegram can override this locally after live mode is enabled.
   auto_reply_enabled: false
-  dialog_inactive_after_seconds: 86400
 
 telegram:
   token_key: telegram_bot_token

@@ -181,7 +181,7 @@ MIGRATIONS: tuple[Migration, ...] = (
             """CREATE TABLE IF NOT EXISTS funpay_auto_replies (
                 id INTEGER PRIMARY KEY,
                 trigger_funpay_message_id INTEGER NOT NULL UNIQUE REFERENCES funpay_messages(id) ON DELETE CASCADE,
-                funpay_dialog_id INTEGER NOT NULL REFERENCES funpay_dialogs(id) ON DELETE CASCADE,
+                funpay_dialog_id INTEGER NOT NULL UNIQUE REFERENCES funpay_dialogs(id) ON DELETE CASCADE,
                 trigger_sent_at TEXT NOT NULL,
                 idempotency_key TEXT NOT NULL UNIQUE,
                 state TEXT NOT NULL CHECK (state IN ('sending', 'sent', 'failed')),

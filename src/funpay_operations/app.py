@@ -40,7 +40,6 @@ class Application:
         self.auto_replies = AutoReplyService(
             self.funpay_replies, AutoReplyRepository(self.database), self.task_states, self.logger,
             default_enabled=settings.funpay_auto_reply_enabled,
-            inactive_after_seconds=settings.funpay_dialog_inactive_after_seconds,
         )
         self.notifications = (
             FunPayMessageNotifier(

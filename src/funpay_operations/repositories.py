@@ -304,15 +304,6 @@ class AutoReplyRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
 
-    def previous_message_time(self, local_dialog_id: int, local_message_id: int) -> str | None:
-        with self.database.session() as connection:
-            row = connection.execute(
-                """SELECT sent_at FROM funpay_messages
-                WHERE dialog_id = ? AND id != ? ORDER BY sent_at DESC, id DESC LIMIT 1""",
-                (local_dialog_id, local_message_id),
-            ).fetchone()
-        return row["sent_at"] if row else None
-
     def claim(self, local_message_id: int, target: ReplyTarget, trigger_sent_at: str) -> AutoReplyAttempt | None:
         with self.database.session() as connection:
             cursor = connection.execute(
