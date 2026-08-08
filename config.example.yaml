@@ -1,0 +1,47 @@
+app:
+  environment: development
+  log_level: INFO
+  data_directory: data
+
+storage:
+  database_file: funpay.sqlite3
+  logs_directory: logs
+  backups_directory: backups
+
+operations:
+  # Real actions are off by default. Enabling them will require a later,
+  # explicit implementation and configuration review.
+  enabled: false
+  mode: safe
+  poll_interval_seconds: 30
+  reconnect_initial_seconds: 5
+  reconnect_max_seconds: 60
+
+funpay:
+  credential_key: funpay_session
+  # No official seller API contract is configured here. Add only owner-verified
+  # relative GET paths; values may use {seller_id}, {after_message_id}, {lot_id}.
+  read_endpoints: {}
+  request_timeout_seconds: 15
+  min_request_interval_seconds: 1.0
+  retry_attempts: 3
+  # Reading remains disabled until both the local endpoint and Telegram target
+  # are explicitly configured below.
+  message_notifications_enabled: false
+  message_poll_interval_seconds: 5
+  # Required only for local live mode; this owner-verified endpoint must honour
+  # the idempotency_key field used for buyer replies.
+  reply_endpoint: ""
+
+telegram:
+  token_key: telegram_bot_token
+  # Keep disabled until the token is stored through funpay-setup and user IDs
+  # are entered in this ignored local configuration file.
+  enabled: false
+  long_poll_timeout_seconds: 25
+  notification_user_id: null
+  allowed_user_ids: []
+
+lots:
+  default_currency: RUB
+  hard_floor: null
