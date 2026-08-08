@@ -1,6 +1,7 @@
 name: Repository policy
 
 on:
+  workflow_dispatch:
   pull_request:
     branches:
       - main
@@ -26,7 +27,22 @@ jobs:
           test -f .github/dependabot.yml
           grep -Fq 'All Rights Reserved' LICENSE
           grep -Fqi 'not open source' LICENSE
-      - name: Reject common sensitive artifacts
+      - name: Reject sensitive artifacts and credentials
         shell: bash
         run: |
-          ! git ls-files | grep -E '(^|/)(\.env|\.env\..+|secrets/|data/|logs/|backups/)|\.(pem|key|pfx|p12|db|sqlite|sqlite3|bak|backup|log)$'
+          while IFS= read -r path; do
+            case "$path" in
+              .env|.env.*|*/.env|*/.env.*)
+                if [[ "$path" != ".env.example" && "$path" != */.env.example ]]; then
+                  echo "Sensitive environment file is tracked: $path"
+                  exit 1
+                fi
+                ;;
+              config.yaml|*/config.yaml|secrets/*|*/secrets/*|data/*|*/data/*|logs/*|*/logs/*|backups/*|*/backups/*|*.pem|*.key|*.pfx|*.p12|*.db|*.sqlite|*.sqlite3|*.bak|*.backup|*.log)
+                echo "Sensitive artifact is tracked: $path"
+                exit 1
+                ;;
+            esac
+          done < <(git ls-files)
+
+          ! git grep -I -n -E '(gh[pous]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|[0-9]{8,10}:[A-Za-z0-9_-]{35})' -- . ':!*.example*'
