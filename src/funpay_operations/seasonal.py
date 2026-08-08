@@ -22,6 +22,7 @@ from .services import DelveService, MythicPlusService, Region
 _MAX_YAML_BYTES = 64 * 1024
 _SEASON_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _SUPPORTED_SCHEMA_VERSION = 1
+_MAX_CONFIRMED_DATA_AGE_DAYS = 30
 
 
 class SeasonalDataError(ValueError):
@@ -95,11 +96,16 @@ class SeasonalData:
         if not self.reward_item_levels or not self.crests or not self.sources:
             raise SeasonalDataError("confirmed data requires rewards, crests, and sources")
 
-    def require_confirmed_for(self, service: str, region: Region) -> None:
+    def require_confirmed_for(self, service: str, region: Region, *, today: date | None = None) -> None:
         if self.service != service or self.region is not region:
             raise SeasonalDataError("seasonal data does not match this service or region")
         if not self.is_confirmed:
             raise UnconfirmedSeasonalDataError("unconfirmed seasonal data cannot be used")
+        checked_today = today or date.today()
+        if self.checked_at is None or self.checked_at > checked_today:
+            raise UnconfirmedSeasonalDataError("seasonal data has no usable verification date")
+        if (checked_today - self.checked_at).days > _MAX_CONFIRMED_DATA_AGE_DAYS:
+            raise UnconfirmedSeasonalDataError("seasonal data is stale and cannot be used")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -153,10 +159,12 @@ class DescriptionGenerator:
     def mythic_plus(self, service: MythicPlusService, data: SeasonalData) -> DescriptionPreview:
         data.require_confirmed_for("mythic_plus", service.region)
         if service.key_level <= 12:
+            rewards = _specific_value(data.reward_item_levels, "key", service.key_level, "reward item level")
+            crests = _specific_value(data.crests, "key", service.key_level, "crests")
             text = (
                 f"Mythic+ +{service.key_level}, формат: {service.service_format.value}. "
-                f"Актуальные награды сезона: {_item_levels_text(data.reward_item_levels)}. "
-                f"Гребни: {_crests_text(data.crests)}. "
+                f"Актуальная награда для этого ключа: ilvl {rewards}. "
+                f"Гребни для этого ключа: {crests}. "
                 "Случайный предмет не гарантируется."
             )
         else:
@@ -169,11 +177,13 @@ class DescriptionGenerator:
 
     def delves(self, service: DelveService, data: SeasonalData) -> DescriptionPreview:
         data.require_confirmed_for("delves", service.region)
+        rewards = _specific_value(data.reward_item_levels, "tier", service.tier, "reward item level")
+        crests = _specific_value(data.crests, "tier", service.tier, "crests")
         mode = "Bountiful" if service.bountiful else "обычное"
         text = (
             f"Delve уровня {service.tier}, {mode}, формат: {service.service_format.value}. "
-            f"Актуальные награды сезона: {_item_levels_text(data.reward_item_levels)}. "
-            f"Гребни: {_crests_text(data.crests)}. "
+            f"Актуальная награда для этого tier: ilvl {rewards}. "
+            f"Гребни для этого tier: {crests}. "
             "Случайный предмет не гарантируется."
         )
         return DescriptionPreview(service.code, data.season, data.data_version, text)
@@ -188,6 +198,8 @@ def _positive_int(value: Any, field: str) -> int:
 def _optional_date(value: Any, field: str) -> date | None:
     if value is None:
         return None
+    if type(value) is date:
+        return value
     if not isinstance(value, str):
         raise SeasonalDataError(f"{field} must be an ISO date or null")
     try:
@@ -236,9 +248,8 @@ def _sources(value: Any) -> tuple[str, ...]:
     return tuple(value)
 
 
-def _item_levels_text(levels: Mapping[str, int]) -> str:
-    return "; ".join(f"{name}: ilvl {level}" for name, level in levels.items())
-
-
-def _crests_text(crests: Mapping[str, str]) -> str:
-    return "; ".join(f"{name}: {detail}" for name, detail in crests.items())
+def _specific_value(values: Mapping[str, Any], prefix: str, level: int, field: str) -> Any:
+    value = values.get(f"{prefix}_{level}")
+    if value is None:
+        raise SeasonalDataError(f"confirmed seasonal data has no {field} for {prefix}_{level}")
+    return value

@@ -24,9 +24,9 @@ def confirmed(service: str, *, region: Region = Region.EU) -> SeasonalData:
         "season": "test_season",
         "region": region.value,
         "start_date": "2026-01-01",
-        "reward_item_levels": {"end_of_dungeon": 700, "great_vault": 710},
-        "crests": {"gilded": "high-tier upgrades"},
-        "checked_at": "2026-01-02",
+        "reward_item_levels": {"key_12": 700, "tier_8": 710},
+        "crests": {"key_12": "gilded", "tier_8": "gilded"},
+        "checked_at": date.today().isoformat(),
         "sources": ["https://example.test/season"],
         "confirmation_status": "confirmed",
     })
@@ -57,7 +57,7 @@ class SeasonalDataTests(unittest.TestCase):
         higher = generator.mythic_plus(MythicPlusService(13, Region.EU, ServiceFormat.PILOT), data)
 
         self.assertIn("ilvl 700", lower.text)
-        self.assertIn("Гребни", lower.text)
+        self.assertIn("Гребни для этого ключа", lower.text)
         self.assertIn("рейтинг Mythic+", higher.text)
         self.assertNotIn("Актуальные награды", higher.text)
         self.assertIn("Случайный предмет не гарантируется.", lower.text)
@@ -70,6 +70,16 @@ class SeasonalDataTests(unittest.TestCase):
         self.assertIn("Случайный предмет не гарантируется.", preview.text)
         with self.assertRaises(SeasonalDataError):
             generator.delves(DelveService(8, False, Region.US, ServiceFormat.SELF_PLAY), confirmed("delves"))
+
+    def test_generator_requires_exact_level_or_tier_and_fresh_confirmation(self) -> None:
+        generator = DescriptionGenerator()
+        with self.assertRaises(SeasonalDataError):
+            generator.mythic_plus(MythicPlusService(10, Region.EU, ServiceFormat.SELF_PLAY), confirmed("mythic_plus"))
+        stale = SeasonalData.from_mapping({
+            **confirmed("delves").to_dict(), "checked_at": "2026-01-01",
+        })
+        with self.assertRaises(UnconfirmedSeasonalDataError):
+            generator.delves(DelveService(8, True, Region.EU, ServiceFormat.SELF_PLAY), stale)
 
     def test_yaml_validation_uses_safe_loader_and_rejects_unsafe_shapes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

@@ -53,6 +53,12 @@ verified rewards, ilvl, and crests; +13 and higher emphasizes Mythic+ rating and
 high keys. Delves has its own template. Every template explicitly states that a
 random item is not guaranteed.
 
+Generate a local-only preview without creating or updating a FunPay lot:
+
+```powershell
+funpay-operations --preview-seasonal-data seasonal_data/v1/mythic_plus.yaml --preview-key-level 10
+```
+
 ## Local setup
 
 ```powershell
