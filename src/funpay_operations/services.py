@@ -133,6 +133,7 @@ class DelveService:
     region: Region
     service_format: ServiceFormat
     runs: int = 1
+    price_conditions: Mapping[str, str] | tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if isinstance(self.tier, bool) or not isinstance(self.tier, int) or not 1 <= self.tier <= 11:
@@ -142,6 +143,7 @@ class DelveService:
         _validated_enum(self.region, Region, "region")
         _validated_enum(self.service_format, ServiceFormat, "service_format")
         object.__setattr__(self, "runs", _validated_package_runs(self.runs))
+        object.__setattr__(self, "price_conditions", _validated_conditions(self.price_conditions))
 
     @property
     def code(self) -> str:
@@ -154,7 +156,8 @@ class DelveService:
 
     @property
     def deduplication_key(self) -> str:
-        return f"{self.code}|{self.region.value}"
+        conditions = ",".join(f"{name}={value}" for name, value in self.price_conditions)
+        return f"{self.code}|{self.region.value}|{conditions}"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -164,6 +167,7 @@ class DelveService:
             "region": self.region.value,
             "service_format": self.service_format.value,
             "runs": self.runs,
+            "price_conditions": dict(self.price_conditions),
             "code": self.code,
         }
 
@@ -180,6 +184,7 @@ class DelveService:
             region=Region(payload.get("region")),
             service_format=ServiceFormat(payload.get("service_format")),
             runs=payload.get("runs", 1),
+            price_conditions=payload.get("price_conditions", {}),
         )
         return _verified_code(payload, service)
 

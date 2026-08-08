@@ -32,8 +32,8 @@ disabled by default and require explicit owner approval for each concrete action
 `funpay_operations.services` defines only local domain descriptions; it neither
 creates nor updates FunPay lots. Mythic+ records validate key level, region,
 service format, package size, and normalized price conditions. Delves records
-validate tier, Bountiful status, region, service format, and package size. Codes
-are deterministic (for example, `mplus_10_selfplay_x1` and
+validate tier, Bountiful status, region, service format, package size, and
+normalized price conditions. Codes are deterministic (for example, `mplus_10_selfplay_x1` and
 `delve_t8_bountiful_selfplay_x1`); the deduplication key also includes regional
 and price-condition variants where relevant.
 

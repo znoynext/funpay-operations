@@ -38,13 +38,26 @@ class ServiceModelTests(unittest.TestCase):
         self.assertEqual(len(catalog.values()), 2)
 
     def test_delve_codes_and_round_trip(self) -> None:
-        bountiful = DelveService(8, True, Region.EU, ServiceFormat.SELF_PLAY)
+        bountiful = DelveService(
+            8, True, Region.EU, ServiceFormat.SELF_PLAY, price_conditions={"keys": "included"}
+        )
         ordinary = DelveService(8, False, Region.EU, ServiceFormat.PILOT, runs=5)
 
         self.assertEqual(bountiful.code, "delve_t8_bountiful_selfplay_x1")
         self.assertEqual(ordinary.code, "delve_t8_pilot_x5")
         self.assertTrue(ordinary.is_package)
+        self.assertEqual(bountiful.price_conditions, (("keys", "included"),))
         self.assertEqual(DelveService.from_json(bountiful.to_json()), bountiful)
+
+    def test_delve_price_conditions_participate_in_stable_deduplication(self) -> None:
+        catalog = ServiceCatalog()
+        included = DelveService(8, True, Region.EU, ServiceFormat.SELF_PLAY, price_conditions={"keys": "included"})
+        buyer_keys = DelveService(8, True, Region.EU, ServiceFormat.SELF_PLAY, price_conditions={"keys": "buyer"})
+
+        catalog.add(included)
+        catalog.add(buyer_keys)
+        with self.assertRaises(DuplicateServiceError):
+            catalog.add(DelveService(8, True, Region.EU, ServiceFormat.SELF_PLAY, price_conditions={"keys": "included"}))
 
     def test_invalid_parameters_and_unsafe_serialization_are_rejected(self) -> None:
         with self.assertRaises(ValueError):
