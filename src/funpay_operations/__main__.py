@@ -24,7 +24,10 @@ from .seasonal import DescriptionGenerator, SeasonalDataError, load_seasonal_dat
 from .services import DelveService, MythicPlusService, Region, ServiceFormat
 from .setup_wizard import SecretStore
 from .smoke import run_smoke_test
-from .windows_infra import (autostart_status, diagnostics, first_run, install_autostart, remove_autostart, resolve_windows_paths)
+from .windows_infra import (
+    autostart_status, diagnostics, first_run, install_autostart, remove_autostart,
+    resolve_background_executable, resolve_windows_paths, safe_config_path,
+)
 
 
 def main() -> int:
@@ -34,6 +37,10 @@ def main() -> int:
     parser.add_argument("--config", type=Path, help="YAML configuration path (takes priority over .env)")
     parser.add_argument("--env-file", type=Path, default=Path(".env"), help="dotenv configuration path")
     parser.add_argument("--once", action="store_true", help="Run one safe background cycle and exit")
+    parser.add_argument(
+        "--background", action="store_true",
+        help="Use the per-user Windows install paths (intended for the noconsole executable)",
+    )
     parser.add_argument("--preview-seasonal-data", type=Path, help="Render a local seasonal description preview from YAML")
     parser.add_argument("--preview-key-level", type=int, help="Mythic+ key level for --preview-seasonal-data")
     parser.add_argument("--preview-delve-tier", type=int, help="Delve tier for --preview-seasonal-data")
@@ -69,15 +76,27 @@ def main() -> int:
     if args.command in {"diagnostics", "first-run", "install-autostart", "remove-autostart", "show-autostart-status", "repair-autostart"}:
         paths = resolve_windows_paths()
         if args.command == "diagnostics":
-            for name, value in diagnostics(paths).items(): print(f"{name}: {value}")
+            for name, value in diagnostics(paths).items():
+                print(f"{name}: {value}")
             return 0
         if args.command == "first-run":
-            for name, value in first_run(paths).items(): print(f"{name}: {value}")
+            for name, value in first_run(paths).items():
+                print(f"{name}: {value}")
             return 0
-        if args.command == "show-autostart-status": print(f"autostart: {autostart_status()}"); return 0
-        executable = Path(sys.executable)
-        if args.command in {"install-autostart", "repair-autostart"}: install_autostart(executable); return 0
-        remove_autostart(); return 0
+        if args.command == "show-autostart-status":
+            print(f"autostart: {autostart_status()}")
+            return 0
+        if args.command in {"install-autostart", "repair-autostart"}:
+            install_autostart(resolve_background_executable())
+            return 0
+        remove_autostart()
+        return 0
+
+    if args.background:
+        paths = resolve_windows_paths()
+        first_run(paths)
+        args.config = safe_config_path(paths)
+        args.env_file = paths.config / ".env"
 
     if args.preview_seasonal_data:
         try:

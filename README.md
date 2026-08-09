@@ -6,6 +6,11 @@ for transparency.
 
 Copyright (c) 2026 znoynext. **All Rights Reserved.**
 
+Technical mock readiness is recorded in
+[`TECHNICAL_READINESS.md`](TECHNICAL_READINESS.md) as
+`TECHNICALLY_READY_FOR_CONNECTION`. This is not authorization for live writes
+and does not indicate that any real FunPay or Telegram account is connected.
+
 ## What is included
 
 - A Python package with a command-line entry point and an `asyncio` background runner.

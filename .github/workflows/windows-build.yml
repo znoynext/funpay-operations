@@ -1,15 +1,38 @@
 name: Windows generic build
-on: [pull_request, workflow_dispatch]
-permissions: { contents: read }
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
 jobs:
   build:
+    name: Standalone executables
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.11' }
-      - run: python -m pip install . pyinstaller
-      - run: pyinstaller --noconfirm --clean --onefile --console --name funpay-operations-cli scripts/windows_entrypoint.py
-      - run: .\dist\funpay-operations-cli.exe diagnostics
-      - uses: actions/upload-artifact@v4
-        with: { name: funpay-operations-generic-windows; path: dist/funpay-operations-cli.exe }
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Build generic executables
+        shell: powershell
+        run: .\scripts\build_windows.ps1
+      - name: Run packaged diagnostics
+        shell: powershell
+        run: .\dist\funpay-operations-cli.exe diagnostics
+      - name: Run one safe packaged background cycle
+        shell: powershell
+        run: .\dist\funpay-operations-cli.exe --background --once
+      - name: Upload generic executables only
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: funpay-operations-generic-windows
+          path: |
+            dist/funpay-operations.exe
+            dist/funpay-operations-cli.exe
