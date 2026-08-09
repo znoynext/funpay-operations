@@ -169,6 +169,14 @@ class TelegramControlRouterTests(unittest.TestCase):
         self.assertIsNone(self.router.handle(self.update(callback=callback, user=2, chat=2)))
         self.assertEqual(self.services.calls, [])
 
+    def test_funpay_reauthorization_help_callback_is_private_and_has_no_session_data(self) -> None:
+        reply = self.router.handle(self.update(callback="setup:funpay"))
+        self.assertIn("Как восстановить FunPay", reply.text)
+        self.assertNotIn("golden_key", reply.text)
+        self.assertNotIn("golden_seal", reply.text)
+        self.assertTrue(reply.edit_message)
+        self.assertIsNone(self.router.handle(self.update(callback="setup:funpay", user=2, chat=2)))
+
     def test_service_failure_has_human_error_message(self) -> None:
         router = TelegramControlRouter((1,), self.states, FailingControlService(), self.gate)
         prices = router.handle(self.update("💰 Цены"))

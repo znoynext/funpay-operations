@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Callable
 
 from .config import Settings
 from .database import Database
 from .funpay import FunPayClient
+from .funpay import FunPaySessionExpired
 from .notifications import FunPayMessageNotifier
+from .session_health import FunPaySessionGuard
 from .runtime import (
     BackgroundSupervisor,
     BackgroundTask,
@@ -32,9 +35,11 @@ class BackgroundRunner:
     def __init__(
         self, settings: Settings, database: Database, logger: logging.Logger, *, funpay: FunPayClient | None = None,
         telegram: TelegramLongPollingBot | None = None, notifications: FunPayMessageNotifier | None = None,
+        session_guard: FunPaySessionGuard | None = None, session_expired_callback: Callable[[], None] | None = None,
     ) -> None:
         self.settings, self.database, self.logger = settings, database, logger
         self.funpay, self.telegram, self.notifications = funpay, telegram, notifications
+        self.session_guard, self.session_expired_callback = session_guard, session_expired_callback
         disabled = DisabledAdapter()
         recovery = RecoveryCoordinator(tuple(
             RecoveryStep(name, disabled.run) for name in RecoveryCoordinator.ORDER
@@ -83,7 +88,21 @@ class BackgroundRunner:
     async def _poll_messages(self) -> TaskDisposition | None:
         if self.notifications is None:
             return TaskDisposition.DISABLED
-        await asyncio.to_thread(self.notifications.sync)
+        if self.session_guard is not None and not self.session_guard.allows_polling():
+            return TaskDisposition.DISABLED
+        try:
+            await asyncio.to_thread(self.notifications.sync)
+        except FunPaySessionExpired:
+            first_expiry = self.session_guard.mark_expired() if self.session_guard is not None else False
+            if first_expiry and self.session_expired_callback is not None:
+                try:
+                    self.session_expired_callback()
+                except Exception:
+                    self.logger.warning("FunPay session expiry notification could not be prepared")
+            self.logger.warning("FunPay session expired; outbound FunPay actions are paused")
+            return TaskDisposition.DISABLED
+        if self.session_guard is not None:
+            self.session_guard.mark_authorized()
         return None
 
     async def _poll_telegram(self) -> TaskDisposition | None:

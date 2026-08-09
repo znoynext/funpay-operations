@@ -12,8 +12,10 @@ from .logging_setup import configure_logging
 from .notifications import FunPayMessageNotifier
 from .replies import FunPayReplyRouter
 from .repositories import AutoReplyRepository, DialogRepository, ReplyRepository, TaskStateRepository, TelegramMessageLinkRepository
+from .session_health import FunPaySessionGuard, SESSION_EXPIRED_MARKUP, SESSION_EXPIRED_TEXT
 from .setup_wizard import SecretStore
 from .telegram import build_telegram_bot
+from .telegram import TelegramError
 from .telegram_control import CompositeTelegramRouter, EmergencyStopGate, MockControlService, TelegramControlRouter
 from .tasks import BackgroundRunner
 from .runtime import SingletonProcessLock
@@ -28,6 +30,7 @@ class Application:
         self.database = Database(settings.database_path)
         self.task_states = TaskStateRepository(self.database)
         secret_store = SecretStore(settings.data_directory / "secrets.dpapi")
+        self.session_guard = FunPaySessionGuard(self.task_states, secret_store.path)
         self.funpay = build_read_client(
             settings, secret_store
         )
@@ -39,13 +42,13 @@ class Application:
                 TelegramControlRouter(settings.allowed_telegram_user_ids, self.task_states, MockControlService(), self.emergency_stop),
                 FunPayReplyRouter(
                     settings.allowed_telegram_user_ids, TelegramMessageLinkRepository(self.database),
-                    ReplyRepository(self.database), self.funpay_replies, outbound_allowed=self.emergency_stop.permits,
+                    ReplyRepository(self.database), self.funpay_replies, outbound_allowed=self._outbound_funpay_permitted,
                 ),
             )
         )
         self.auto_replies = AutoReplyService(
             self.funpay_replies, AutoReplyRepository(self.database), self.task_states, self.logger,
-            default_enabled=settings.funpay_auto_reply_enabled, outbound_allowed=self.emergency_stop.permits,
+            default_enabled=settings.funpay_auto_reply_enabled, outbound_allowed=self._outbound_funpay_permitted,
         )
         self.notifications = (
             FunPayMessageNotifier(
@@ -57,9 +60,23 @@ class Application:
         )
         self.runner = BackgroundRunner(
             settings, self.database, self.logger, funpay=self.funpay, telegram=self.telegram,
-            notifications=self.notifications,
+            notifications=self.notifications, session_guard=self.session_guard,
+            session_expired_callback=self._notify_funpay_session_expired,
         )
         self.process_lock = SingletonProcessLock(settings.data_directory / "funpay-operations.lock")
+
+    def _outbound_funpay_permitted(self, operation: str) -> bool:
+        return self.emergency_stop.permits(operation) and self.session_guard.permits(operation)
+
+    def _notify_funpay_session_expired(self) -> None:
+        if not self.settings.telegram_enabled or self.settings.telegram_notification_user_id is None:
+            return
+        try:
+            self.telegram.send_private_notification(
+                self.settings.telegram_notification_user_id, SESSION_EXPIRED_TEXT, SESSION_EXPIRED_MARKUP
+            )
+        except (TelegramError, PermissionError):
+            self.logger.warning("FunPay session expiry notification could not be delivered")
 
     @classmethod
     def from_files(cls, config_path: Path, env_path: Path) -> "Application":

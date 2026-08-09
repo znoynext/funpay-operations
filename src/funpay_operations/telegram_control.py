@@ -255,6 +255,13 @@ class TelegramControlRouter:
         if update.user_id not in self.allowed or update.chat_id != update.user_id:
             return None
         if update.callback_data is not None:
+            if update.callback_data == "setup:funpay":
+                return CommandReply(
+                    "Как восстановить FunPay\n\n"
+                    "Откройте локальный setup wizard и выберите FunPay. "
+                    "Данные сессии вводятся только локально, без отображения в чате.",
+                    edit_message=True,
+                )
             return self._callback(update.user_id, update.callback_data)
         text = (update.text or "").strip()
         if not text:

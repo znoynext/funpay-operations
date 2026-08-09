@@ -330,6 +330,17 @@ MIGRATIONS: tuple[Migration, ...] = (
             "CREATE INDEX IF NOT EXISTS idx_raise_attempts_family_time ON raise_attempts(family, attempted_at)",
         ),
     ),
+    (
+        11,
+        "local setup preferences",
+        (
+            """CREATE TABLE IF NOT EXISTS local_setup_preferences (
+                name TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )""",
+        ),
+    ),
 )
 
 
