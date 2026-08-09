@@ -60,7 +60,22 @@ class FakeProfileManager:
 
 class FakeLotManager:
     async def get_lot_info(self, lot_id: str) -> object:
-        return SimpleNamespace(price={"a": "12.345", "b": 20}[lot_id])
+        return SimpleNamespace(
+            price={"a": "12.345", "b": 20}[lot_id], short_desc="Short", description="Description",
+        )
+
+    async def _get_lot_editor_details(self, lot_id: str) -> object:
+        return SimpleNamespace(
+            node_id={"a": "10", "b": "20"}[lot_id], location="", deleted="0",
+            fields={"active": "on", "price": "12.345", "secrets": "never expose", "fields[payment_msg][ru]": "private"},
+        )
+
+    async def get_node_editor_data(self, node_id: str) -> object:
+        return SimpleNamespace(fields=[
+            SimpleNamespace(key="price", options=None),
+            SimpleNamespace(key="fields[type]", options=[SimpleNamespace(key="Run", value="run")]),
+            SimpleNamespace(key="secrets", options=[SimpleNamespace(key="private", value="private")]),
+        ])
 
 
 class FakeChatManager:
@@ -135,6 +150,12 @@ class FunPayClientTests(unittest.TestCase):
         self.assertTrue(client.check_authorization())
         self.assertEqual(client.get_profile(), FunPayProfile("7", "Owner", True))
         self.assertEqual(client.get_own_lots()[0].price_minor, 1235)
+        lot_details = client.get_own_lot_details()[0]
+        self.assertEqual((lot_details.category_node_id, lot_details.is_active), ("10", True))
+        self.assertEqual(lot_details.description, "Description")
+        self.assertEqual(lot_details.editor_fields, {"active": "on", "price": "12.345"})
+        self.assertEqual(lot_details.editor_options, {"price": (), "fields[type]": (("Run", "run"),)})
+        self.assertEqual(lot_details.omitted_field_names, ("fields[payment_msg][ru]", "secrets"))
         self.assertEqual(client.get_seller_lots("42")[0].seller_id, "42")
         dialog = client.get_dialogs()[0]
         self.assertEqual((dialog.dialog_id, dialog.counterparty_id, dialog.counterparty_name), ("100", "88", "Buyer"))
@@ -192,6 +213,7 @@ class FunPayClientTests(unittest.TestCase):
         mock = MockFunPayClient(profile=FunPayProfile("mock", "tester", True), bump_metadata={"1": FunPayBumpMetadata("1", ("2",))})
         self.assertTrue(mock.check_authorization())
         self.assertEqual(mock.get_seller_lots("other"), ())
+        self.assertEqual(mock.get_own_lot_details(), ())
         self.assertTrue(mock.check_bump_availability("1"))
 
     def test_composition_defers_dpapi_session_access_and_has_no_endpoints(self) -> None:

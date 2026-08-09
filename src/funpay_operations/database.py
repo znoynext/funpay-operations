@@ -191,6 +191,41 @@ MIGRATIONS: tuple[Migration, ...] = (
             "CREATE INDEX IF NOT EXISTS idx_auto_replies_dialog ON funpay_auto_replies(funpay_dialog_id, trigger_sent_at)",
         ),
     ),
+    (
+        5,
+        "read-only own lot registry",
+        (
+            """CREATE TABLE IF NOT EXISTS own_lot_registry (
+                external_id TEXT PRIMARY KEY,
+                category_node_id TEXT,
+                title TEXT NOT NULL,
+                price_minor INTEGER NOT NULL CHECK (price_minor >= 0),
+                currency TEXT NOT NULL,
+                is_active INTEGER CHECK (is_active IN (0, 1) OR is_active IS NULL),
+                region TEXT,
+                short_description TEXT,
+                description TEXT,
+                location TEXT,
+                is_deleted INTEGER CHECK (is_deleted IN (0, 1) OR is_deleted IS NULL),
+                editor_fields_json TEXT NOT NULL,
+                editor_options_json TEXT NOT NULL,
+                omitted_field_names_json TEXT NOT NULL,
+                available_field_names_json TEXT NOT NULL,
+                classification TEXT NOT NULL CHECK (classification IN ('mythic_plus', 'delves', 'unknown')),
+                mapping_state TEXT NOT NULL CHECK (mapping_state IN ('mapped', 'unmapped')),
+                service_data_json TEXT NOT NULL,
+                discovered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS own_lot_templates (
+                template_kind TEXT PRIMARY KEY CHECK (template_kind IN ('mythic_plus', 'delves')),
+                external_lot_id TEXT NOT NULL REFERENCES own_lot_registry(external_id) ON DELETE CASCADE,
+                selected_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_own_lot_registry_classification ON own_lot_registry(classification, mapping_state)",
+        ),
+    ),
 )
 
 
