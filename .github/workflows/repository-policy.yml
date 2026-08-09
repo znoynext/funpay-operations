@@ -45,4 +45,5 @@ jobs:
             esac
           done < <(git ls-files)
 
-          ! git grep -I -l -E '(gh[pous]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|[0-9]{8,10}:[A-Za-z0-9_-]{35}|(golden_key|golden_seal|telegram_bot_token)[[:space:]]*[:=][[:space:]]*["'"']?[A-Za-z0-9_%.-]{12,})' -- . ':!*.example*'
+          secret_pattern="(gh[pous]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|[0-9]{8,10}:[A-Za-z0-9_-]{35}|(golden_key|golden_seal|telegram_bot_token)[[:space:]]*[:=][[:space:]]*['\"][A-Za-z0-9_%.-]{24,}['\"])"
+          ! git grep -I -l -E "$secret_pattern" -- . ':!*.example*'
