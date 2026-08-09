@@ -284,6 +284,35 @@ MIGRATIONS: tuple[Migration, ...] = (
             "CREATE INDEX IF NOT EXISTS idx_competitor_service_mappings_code ON competitor_service_mappings(service_code, mapping_state)",
         ),
     ),
+    (
+        9,
+        "price transaction snapshots",
+        (
+            """CREATE TABLE IF NOT EXISTS price_transaction_batches (
+                batch_id TEXT PRIMARY KEY,
+                family TEXT NOT NULL CHECK (family IN ('mythic_plus', 'delves')),
+                status TEXT NOT NULL CHECK (status IN ('pending', 'completed', 'failed', 'rolled_back')),
+                error_reason TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS price_transaction_snapshot_items (
+                batch_id TEXT NOT NULL REFERENCES price_transaction_batches(batch_id) ON DELETE CASCADE,
+                lot_id TEXT NOT NULL,
+                service_code TEXT NOT NULL,
+                price_minor INTEGER NOT NULL CHECK (price_minor > 0),
+                currency TEXT NOT NULL,
+                PRIMARY KEY (batch_id, lot_id)
+            )""",
+            """CREATE TABLE IF NOT EXISTS unsafe_for_raise_families (
+                family TEXT PRIMARY KEY CHECK (family IN ('mythic_plus', 'delves')),
+                error_reason TEXT NOT NULL,
+                marked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_price_transaction_batches_family ON price_transaction_batches(family, status, created_at)",
+        ),
+    ),
 )
 
 

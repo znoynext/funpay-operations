@@ -153,6 +153,25 @@ number of simultaneous extreme downward targets that lack multi-seller
 consensus; its threshold is a risk signal, never a cap on consensus-confirmed
 volatility.
 
+## Mock price transactions and rollback
+
+`PriceUpdateCoordinator` is a technical mock-only transaction engine. For each
+Mythic+ and Delves family independently it fetches normalized observations,
+applies mapping/anomaly/consensus checks, calculates decisions, validates the
+batch, snapshots current local prices, writes only different targets, rereads,
+and verifies. A verification mismatch gets exactly one retry and reread; a
+remaining mismatch fails the lot and marks that family `unsafe_for_raise` with
+an error reason. `PriceSnapshotRepository` restores the latest completed
+family snapshot through the same write/reread/verify path.
+
+The safe CLI uses empty mock adapters only:
+
+```powershell
+funpay-operations prices check
+funpay-operations prices dry-run-update
+funpay-operations prices rollback-preview
+```
+
 ## Seasonal data and description previews
 
 Public seasonal metadata lives under `seasonal_data/v1/` and includes only

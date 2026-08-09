@@ -19,6 +19,7 @@ from .database import Database
 from .lot_discovery import OwnLotRegistryRepository, run_discovery
 from .lot_sync import run_plan_sync
 from .lot_writes import MockLotWriteClient
+from .price_transactions import run_price_transaction_command
 from .seasonal import DescriptionGenerator, SeasonalDataError, load_seasonal_data
 from .services import DelveService, MythicPlusService, Region, ServiceFormat
 from .setup_wizard import SecretStore
@@ -27,8 +28,8 @@ from .smoke import run_smoke_test
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the FunPay operations background scaffold.")
-    parser.add_argument("command", nargs="?", choices=["smoke-test", "discover-lots", "catalog", "lots"], help="run a local command")
-    parser.add_argument("catalog_action", nargs="?", choices=["preview", "validate", "init-example", "plan-sync"])
+    parser.add_argument("command", nargs="?", choices=["smoke-test", "discover-lots", "catalog", "lots", "prices"], help="run a local command")
+    parser.add_argument("catalog_action", nargs="?", choices=["preview", "validate", "init-example", "plan-sync", "check", "dry-run-update", "rollback-preview"])
     parser.add_argument("--config", type=Path, help="YAML configuration path (takes priority over .env)")
     parser.add_argument("--env-file", type=Path, default=Path(".env"), help="dotenv configuration path")
     parser.add_argument("--once", action="store_true", help="Run one safe background cycle and exit")
@@ -57,6 +58,10 @@ def main() -> int:
     parser.add_argument(
         "--registry-database", type=Path, default=Path("data") / "funpay.sqlite3",
         help="local ignored SQLite path for discovered own lots and confirmed mappings",
+    )
+    parser.add_argument(
+        "--price-database", type=Path, default=Path("data") / "price_transactions.sqlite3",
+        help="local ignored SQLite path for mock transaction snapshots",
     )
     args = parser.parse_args()
 
@@ -94,6 +99,10 @@ def main() -> int:
             write_client=MockLotWriteClient(),
             output=sys.stdout,
         )
+    if args.command == "prices":
+        if args.catalog_action not in {"check", "dry-run-update", "rollback-preview"}:
+            parser.error("prices requires check, dry-run-update, or rollback-preview")
+        return run_price_transaction_command(args.catalog_action, database=Database(args.price_database), output=sys.stdout)
     if args.command == "smoke-test":
         settings = load_settings(config_path=config_path, env_path=args.env_file)
         client = build_read_client(settings, SecretStore(settings.data_directory / "secrets.dpapi"))
