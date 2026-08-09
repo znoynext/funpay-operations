@@ -12,7 +12,7 @@ try {
 if ($LASTEXITCODE -ne 0) { throw 'Windows build failed.' }
 
 $dist = Join-Path $projectRoot 'dist'
-$names = @('funpay-operations.exe', 'funpay-operations-cli.exe', 'funpay-operations-setup.exe')
+$names = @('funpay-operations.exe', 'funpay-operations-cli.exe', 'funpay-operations-setup.exe', 'funpay-operations-auth.exe', 'THIRD_PARTY_NOTICES.md')
 foreach ($name in $names) {
     $file = Join-Path $dist $name
     if (-not (Test-Path -LiteralPath $file) -or (Get-Item -LiteralPath $file).Length -le 0) {
@@ -35,12 +35,15 @@ foreach ($name in $names) {
 $installedCli = Join-Path $application 'funpay-operations-cli.exe'
 $installedBackground = Join-Path $application 'funpay-operations.exe'
 $installedSetup = Join-Path $application 'funpay-operations-setup.exe'
+$installedAuth = Join-Path $application 'funpay-operations-auth.exe'
 & $installedCli diagnostics
 if ($LASTEXITCODE -ne 0) { throw 'Installed diagnostics failed.' }
 & $installedBackground --background --once
 if ($LASTEXITCODE -ne 0) { throw 'Installed background smoke cycle failed.' }
 & $installedSetup --smoke
 if ($LASTEXITCODE -ne 0) { throw 'Installed Setup Center smoke test failed.' }
+& $installedAuth --runtime-status
+if ($LASTEXITCODE -ne 0) { throw 'Installed WebView2 Runtime check failed.' }
 
 [xml]$task = schtasks /Query /TN 'FunPay Operations Background' /XML
 $taskTarget = $task.Task.Actions.Exec.Command
@@ -55,7 +58,7 @@ if ($shell.CreateShortcut($shortcut).TargetPath -ne $installedSetup) {
     throw 'Start Menu shortcut target does not match the installed Setup Center.'
 }
 
-Get-ChildItem -LiteralPath $application -Filter 'funpay-operations*.exe' | Select-Object Name, Length
+Get-ChildItem -LiteralPath $application | Where-Object { $_.Name -like 'funpay-operations*.exe' -or $_.Name -eq 'THIRD_PARTY_NOTICES.md' } | Select-Object Name, Length
 if (-not $NoLaunch) {
     Start-Process -FilePath $installedSetup
 }

@@ -24,11 +24,15 @@ from .runtime import DuplicateProcessError, SingletonProcessLock
 
 TASK_NAME = "FunPay Operations Background"
 SAFE_CONFIG_NAME = "config.yaml"
-INSTALLER_FILES = (
+PRIMARY_EXECUTABLES = (
     "funpay-operations.exe",
     "funpay-operations-cli.exe",
     "funpay-operations-setup.exe",
 )
+AUTH_HELPER_NAME = "funpay-operations-auth.exe"
+THIRD_PARTY_NOTICES_NAME = "THIRD_PARTY_NOTICES.md"
+INSTALLER_FILES = PRIMARY_EXECUTABLES + (AUTH_HELPER_NAME, THIRD_PARTY_NOTICES_NAME)
+WEBVIEW2_CLIENT_KEY = r"Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
 SETUP_SHORTCUT_NAME = "FunPay Operations Setup.lnk"
 
 @dataclass(frozen=True)
@@ -248,6 +252,12 @@ def diagnostics(paths: WindowsPaths) -> dict[str, str]:
     except (sqlite3.Error, ValueError, json.JSONDecodeError):
         result["owner"] = "error"
     result["funpay_adapter"] = "available"
+    result["webview2_runtime"] = webview2_runtime_status()
+    try:
+        installed_auth_helper(paths)
+        result["webview2_helper"] = "available"
+    except WindowsSetupError:
+        result["webview2_helper"] = "not_configured"
     result["autostart"] = autostart_status()
     return result
 
@@ -273,27 +283,40 @@ def _is_nonempty_file(path: Path) -> bool:
         return False
 
 
-def installer_source_files(current_executable: Path | None = None) -> tuple[Path, Path, Path]:
-    """Find all generic PyInstaller files beside a standalone executable."""
+def installer_source_files(current_executable: Path | None = None) -> tuple[Path, Path, Path, Path, Path]:
+    """Find the complete generic Windows build beside a standalone executable."""
 
     current = (current_executable or Path(sys.executable)).resolve()
     directory = current.parent
     background = directory / "funpay-operations.exe"
     cli = directory / "funpay-operations-cli.exe"
     setup = directory / "funpay-operations-setup.exe"
-    if not all(_is_nonempty_file(path) for path in (background, cli, setup)):
+    auth = directory / AUTH_HELPER_NAME
+    notices = directory / THIRD_PARTY_NOTICES_NAME
+    if not all(_is_nonempty_file(path) for path in (background, cli, setup, auth, notices)):
         raise WindowsSetupError("standalone application files are unavailable")
-    return background, cli, setup
+    return background, cli, setup, auth, notices
 
 
 def install_application(
     paths: WindowsPaths, *, source_background: Path, source_cli: Path, source_setup: Path,
-) -> tuple[Path, Path, Path]:
+    source_auth: Path | None = None, source_notices: Path | None = None,
+) -> tuple[Path, ...]:
     """Atomically install generic binaries without touching per-user data."""
 
-    sources = (source_background, source_cli, source_setup)
+    if (source_auth is None) != (source_notices is None):
+        raise WindowsSetupError("authentication helper and notices must be installed together")
+    sources = (
+        (source_background, source_cli, source_setup)
+        if source_auth is None
+        else (source_background, source_cli, source_setup, source_auth, source_notices)
+    )
     expected = tuple(source.name.casefold() for source in sources)
-    if expected != INSTALLER_FILES:
+    allowed_names = {
+        tuple(name.casefold() for name in PRIMARY_EXECUTABLES),
+        tuple(name.casefold() for name in INSTALLER_FILES),
+    }
+    if expected not in allowed_names:
         raise WindowsSetupError("installer files have unexpected names")
     if not all(_is_nonempty_file(source) for source in sources):
         raise WindowsSetupError("installer files are missing")
@@ -355,17 +378,56 @@ def install_application(
 def install_current_build(paths: WindowsPaths, current_executable: Path | None = None) -> tuple[Path, Path, Path]:
     """Install the currently launched generic build into its per-user app folder."""
 
-    background, cli, setup = installer_source_files(current_executable)
-    return install_application(paths, source_background=background, source_cli=cli, source_setup=setup)
+    background, cli, setup, auth, notices = installer_source_files(current_executable)
+    installed = install_application(
+        paths, source_background=background, source_cli=cli, source_setup=setup,
+        source_auth=auth, source_notices=notices,
+    )
+    return installed[:3]  # type: ignore[return-value]
 
 
 def installed_binaries(paths: WindowsPaths) -> tuple[Path, Path, Path]:
     """Return all expected installed files only when every one is non-empty."""
 
-    binaries = tuple(paths.application / name for name in INSTALLER_FILES)
+    binaries = tuple(paths.application / name for name in PRIMARY_EXECUTABLES)
     if not all(_is_nonempty_file(path) for path in binaries):
         raise WindowsSetupError("installed application files are incomplete")
     return binaries  # type: ignore[return-value]
+
+
+def installed_auth_helper(paths: WindowsPaths) -> Path:
+    """Return the verified internal WebView2 helper from the installed app only."""
+
+    helper = paths.application / AUTH_HELPER_NAME
+    notices = paths.application / THIRD_PARTY_NOTICES_NAME
+    if not _is_nonempty_file(helper) or not _is_nonempty_file(notices):
+        raise WindowsSetupError("WebView2 authentication component is not installed")
+    return helper
+
+
+def webview2_runtime_status() -> str:
+    """Check the official Evergreen Runtime registration without launching a browser."""
+
+    if os.name != "nt":
+        return "unavailable"
+    try:
+        import winreg
+
+        locations = (
+            (winreg.HKEY_LOCAL_MACHINE, WEBVIEW2_CLIENT_KEY, winreg.KEY_WOW64_32KEY),
+            (winreg.HKEY_CURRENT_USER, WEBVIEW2_CLIENT_KEY, 0),
+        )
+        for hive, key, view in locations:
+            try:
+                with winreg.OpenKey(hive, key, 0, winreg.KEY_READ | view) as handle:
+                    value, _ = winreg.QueryValueEx(handle, "pv")
+                if isinstance(value, str) and value.strip() and value != "0.0.0.0":
+                    return "available"
+            except OSError:
+                continue
+    except ImportError:
+        return "unavailable"
+    return "unavailable"
 
 def task_scheduler_xml(executable: Path) -> str:
     """Return a Scheduler XML task with command and arguments kept separate."""
@@ -614,6 +676,7 @@ def diagnostics_summary(result: dict[str, str]) -> tuple[str, ...]:
         f"{marker(result.get('database', 'error'))} Database — {database}",
         f"{marker(result.get('autostart', 'not_configured'))} Autostart — {'включён' if result.get('autostart') == 'installed' else 'не настроен'}",
         f"⚪ FunPay — {funpay}",
+        f"{marker(result.get('webview2_runtime', 'unavailable'))} WebView2 — {'доступен' if result.get('webview2_runtime') == 'available' else 'требуется Runtime'}",
         f"{marker(result.get('telegram', 'not_configured'))} Telegram — {telegram}",
         f"{marker(result.get('catalog', 'not_configured'))} Service catalog — {catalog}",
     )

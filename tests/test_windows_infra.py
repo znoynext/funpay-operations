@@ -197,17 +197,37 @@ class WindowsInfraTests(unittest.TestCase):
                     install_application(paths, source_background=files[0], source_cli=files[1], source_setup=files[2])
             self.assertEqual(tuple(path.read_bytes() for path in installed), before)
 
-    def test_installer_source_requires_all_three_nonempty_binaries(self) -> None:
+    def test_installer_source_requires_all_binaries_and_notices(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            for name in ("funpay-operations.exe", "funpay-operations-cli.exe", "funpay-operations-setup.exe"):
+            for name in ("funpay-operations.exe", "funpay-operations-cli.exe", "funpay-operations-setup.exe", "funpay-operations-auth.exe", "THIRD_PARTY_NOTICES.md"):
                 (root / name).write_bytes(b"binary")
             self.assertEqual(tuple(path.name for path in installer_source_files(root / "funpay-operations-cli.exe")), (
-                "funpay-operations.exe", "funpay-operations-cli.exe", "funpay-operations-setup.exe",
+                "funpay-operations.exe", "funpay-operations-cli.exe", "funpay-operations-setup.exe", "funpay-operations-auth.exe", "THIRD_PARTY_NOTICES.md",
             ))
-            (root / "funpay-operations-setup.exe").write_bytes(b"")
+            (root / "funpay-operations-auth.exe").write_bytes(b"")
             with self.assertRaisesRegex(Exception, "unavailable"):
                 installer_source_files(root / "funpay-operations-cli.exe")
+
+    def test_full_installer_set_including_uppercase_notices_is_installed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "dist"
+            source.mkdir()
+            sources = []
+            for name in ("funpay-operations.exe", "funpay-operations-cli.exe", "funpay-operations-setup.exe", "funpay-operations-auth.exe", "THIRD_PARTY_NOTICES.md"):
+                target = source / name
+                target.write_bytes(b"generic")
+                sources.append(target)
+            paths = resolve_windows_paths(root / "local")
+
+            installed = install_application(
+                paths, source_background=sources[0], source_cli=sources[1], source_setup=sources[2],
+                source_auth=sources[3], source_notices=sources[4],
+            )
+
+            self.assertEqual(tuple(path.name for path in installed), tuple(path.name for path in sources))
+            self.assertEqual((paths.application / "THIRD_PARTY_NOTICES.md").read_bytes(), b"generic")
 
     def test_task_target_and_start_menu_commands_are_specific_to_installed_files(self) -> None:
         executable = Path(r"C:\Users\Owner\AppData\Local\FunPay Operations\app\funpay-operations.exe")

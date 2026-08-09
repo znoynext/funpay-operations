@@ -17,9 +17,10 @@ from .setup_wizard import SecretStore
 from .telegram import build_telegram_bot
 from .telegram import TelegramError
 from .telegram_control import CompositeTelegramRouter, EmergencyStopGate, MockControlService, TelegramControlRouter
+from .telegram_auth import LocalFunPayAuthRequest, TelegramFunPayAuthRouter
 from .tasks import BackgroundRunner
 from .runtime import SingletonProcessLock
-from .windows_infra import configured_telegram_owner_id
+from .windows_infra import configured_telegram_owner_id, resolve_windows_paths
 
 
 class Application:
@@ -45,8 +46,10 @@ class Application:
             settings, secret_store, self.task_states, self.logger, allowed_user_ids=self.allowed_telegram_user_ids,
         )
         self.emergency_stop = EmergencyStopGate(self.task_states)
+        self.local_funpay_auth = LocalFunPayAuthRequest(resolve_windows_paths(), self.task_states)
         self.telegram.set_interaction_router(
             CompositeTelegramRouter(
+                TelegramFunPayAuthRouter(self.allowed_telegram_user_ids, self.local_funpay_auth),
                 TelegramControlRouter(self.allowed_telegram_user_ids, self.task_states, MockControlService(), self.emergency_stop),
                 FunPayReplyRouter(
                     self.allowed_telegram_user_ids, TelegramMessageLinkRepository(self.database),

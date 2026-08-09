@@ -13,7 +13,10 @@ SESSION_EXPIRED_TEXT = (
     "Автоматические изменения остановлены."
 )
 SESSION_EXPIRED_MARKUP = {
-    "inline_keyboard": [[{"text": "Как восстановить", "callback_data": "setup:funpay"}]],
+    "inline_keyboard": [[
+        {"text": "🔐 Авторизоваться", "callback_data": "auth:funpay"},
+        {"text": "🩺 Статус", "callback_data": "auth:status"},
+    ]],
 }
 
 

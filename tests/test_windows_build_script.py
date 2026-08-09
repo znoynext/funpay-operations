@@ -13,6 +13,9 @@ class WindowsBuildScriptTests(unittest.TestCase):
         self.assertIn("--console --paths src --name funpay-operations-cli", script)
         self.assertIn("--noconsole --paths src --name funpay-operations-setup", script)
         self.assertIn("windows_setup_entrypoint.py", script)
+        self.assertIn("FunPayOperations.AuthHelper", script)
+        self.assertIn("funpay-operations-auth.exe", script)
+        self.assertIn("WebView2 authentication helper build failed", script)
 
     def test_developer_installer_builds_installs_verifies_and_opens_setup_center(self) -> None:
         root = Path(__file__).resolve().parents[1]
