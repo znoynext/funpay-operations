@@ -29,6 +29,11 @@ jobs:
       - name: Run one safe packaged background cycle
         shell: powershell
         run: .\dist\funpay-operations-cli.exe --background --once
+      - name: Run packaged first-install flow without accounts
+        shell: powershell
+        run: |
+          .\dist\funpay-operations-cli.exe setup --non-interactive
+          .\dist\funpay-operations-cli.exe uninstall
       - name: Upload generic executables only
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

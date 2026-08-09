@@ -25,18 +25,29 @@ from .services import DelveService, MythicPlusService, Region, ServiceFormat
 from .setup_wizard import SecretStore
 from .smoke import run_smoke_test
 from .windows_infra import (
-    autostart_status, diagnostics, first_run, install_autostart, remove_autostart,
-    resolve_background_executable, resolve_windows_paths, safe_config_path,
+    autostart_status, diagnostics, diagnostics_summary, first_run, install_autostart, install_current_build,
+    remove_autostart, resolve_background_executable, resolve_windows_paths, run_setup_wizard, safe_config_path,
+    WindowsSetupError,
 )
 
 
 def main() -> int:
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+        except (AttributeError, OSError):
+            pass
+    if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="Run the FunPay operations background scaffold.")
-    parser.add_argument("command", nargs="?", choices=["smoke-test", "discover-lots", "catalog", "lots", "prices", "diagnostics", "first-run", "install-autostart", "remove-autostart", "show-autostart-status", "repair-autostart"], help="run a local command")
+    parser.add_argument("command", nargs="?", choices=["smoke-test", "discover-lots", "catalog", "lots", "prices", "diagnostics", "first-run", "setup", "install", "uninstall", "install-autostart", "remove-autostart", "show-autostart-status", "repair-autostart"], help="run a local command")
     parser.add_argument("catalog_action", nargs="?", choices=["preview", "validate", "init-example", "plan-sync", "check", "dry-run-update", "rollback-preview"])
     parser.add_argument("--config", type=Path, help="YAML configuration path (takes priority over .env)")
     parser.add_argument("--env-file", type=Path, default=Path(".env"), help="dotenv configuration path")
     parser.add_argument("--once", action="store_true", help="Run one safe background cycle and exit")
+    parser.add_argument("--non-interactive", action="store_true", help="Skip optional local setup choices")
     parser.add_argument(
         "--background", action="store_true",
         help="Use the per-user Windows install paths (intended for the noconsole executable)",
@@ -73,15 +84,34 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if args.command in {"diagnostics", "first-run", "install-autostart", "remove-autostart", "show-autostart-status", "repair-autostart"}:
+    if args.command in {"diagnostics", "first-run", "setup", "install", "uninstall", "install-autostart", "remove-autostart", "show-autostart-status", "repair-autostart"}:
         paths = resolve_windows_paths()
         if args.command == "diagnostics":
-            for name, value in diagnostics(paths).items():
-                print(f"{name}: {value}")
+            for line in diagnostics_summary(diagnostics(paths)):
+                print(line)
             return 0
         if args.command == "first-run":
             for name, value in first_run(paths).items():
                 print(f"{name}: {value}")
+            return 0
+        if args.command in {"setup", "install"}:
+            try:
+                background, _ = install_current_build(paths)
+            except WindowsSetupError:
+                # Development and CI may run this Python entry point directly.
+                # The wizard remains useful but intentionally never invents an
+                # autostart target when no standalone build exists.
+                background = None
+            try:
+                return run_setup_wizard(
+                    paths, sys.stdout, installed_background=background,
+                    input_fn=None if args.non_interactive else input,
+                )
+            except WindowsSetupError:
+                return 1
+        if args.command == "uninstall":
+            remove_autostart()
+            print("Автозапуск удалён. Локальные данные и зашифрованные секреты сохранены.")
             return 0
         if args.command == "show-autostart-status":
             print(f"autostart: {autostart_status()}")

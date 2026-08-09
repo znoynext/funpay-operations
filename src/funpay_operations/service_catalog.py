@@ -14,7 +14,7 @@ import shutil
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Mapping, TextIO
+from typing import Mapping, TextIO
 
 from .database import Database
 
@@ -115,9 +115,14 @@ def load_catalog_definition(path: Path) -> Mapping[str, object]:
 def generate_catalog(definition: Mapping[str, object]) -> tuple[CatalogService, ...]:
     if definition.get("version") != 1:
         raise ServiceCatalogValidationError("catalog version must be 1")
-    mythic = _mapping(definition.get("mythic_plus"), "mythic_plus")
-    delves = _mapping(definition.get("delves"), "delves")
-    services = (*_generate_mythic_plus(mythic), *_generate_delves(delves))
+    mythic_raw = definition.get("mythic_plus")
+    delves_raw = definition.get("delves")
+    if mythic_raw is None and delves_raw is None:
+        raise ServiceCatalogValidationError("choose at least one service family")
+    services = (
+        *(_generate_mythic_plus(_mapping(mythic_raw, "mythic_plus")) if mythic_raw is not None else ()),
+        *(_generate_delves(_mapping(delves_raw, "delves")) if delves_raw is not None else ()),
+    )
     _validate_services(services)
     return tuple(sorted(services, key=lambda service: service.stable_code))
 

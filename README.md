@@ -248,12 +248,69 @@ and backups. Updating the executable leaves these directories untouched;
 uninstalling the executable also preserves them until the user deliberately
 removes them.
 
-Run `funpay-operations first-run` to create and validate the local structure.
-`funpay-operations diagnostics` reports absent FunPay and Telegram secrets as
-`not_configured`. Autostart commands are `install-autostart`,
-`remove-autostart`, `show-autostart-status`, and `repair-autostart`. The task
-`FunPay Operations Background` is per current user, uses `ONLOGON` with a
-30-second delay and limited privileges, and invokes the noconsole executable.
+For normal Windows use, launch the CLI companion once and choose the guided
+setup instead of creating configuration files yourself:
+
+```powershell
+.\funpay-operations-cli.exe setup
+```
+
+The installer copies only the generic executables into the per-user application
+folder, creates the folders and SQLite database, applies migrations, installs
+the per-user autostart task, and displays a seven-step summary. The setup flow
+does not request an account, contact FunPay or Telegram, or enable live
+operations. `--non-interactive` safely chooses **Настроить позже** for each
+optional step, which is useful for a managed installation.
+
+The guided catalog screen lets an owner choose Mythic+, Delves, ranges, formats
+and packages, shows the number of local services before saving, and stores the
+validated result in local SQLite. The minimum-price screen records amounts in
+rubles with the plain-language promise: *the bot will never set a price below
+this value*. No YAML paths or internal identifiers are required in this flow.
+
+`funpay-operations diagnostics` prints a short summary such as Application,
+Database, Autostart, FunPay, Telegram, and Service catalog. Missing account
+data is shown as **не настроен**, never as a crash. Technical failures use a
+short retry/details state; the traceback is reserved for local logs.
+
+The Task Scheduler task is `FunPay Operations Background`, scoped to the
+current Windows user, delayed 30 seconds after logon, uses limited privileges,
+and starts the noconsole executable. `install-autostart`, `remove-autostart`,
+`show-autostart-status`, and `repair-autostart` remain available for technical
+support. `funpay-operations uninstall` removes only the autostart task and
+explicitly preserves the local data and encrypted secrets.
+
+## Connection setup UX (prepared, not connected)
+
+The FunPay screen is deliberately a local-only preparation screen at this
+stage. It explains that the bot will use an existing FunPay session, that a
+browser does not need to remain open, and that session data is encrypted for
+the current Windows user. Future session entry uses the existing no-echo DPAPI
+command; neither `golden_key` nor `golden_seal` appears in a screen, log,
+configuration file, Telegram message, CI run, or artifact.
+
+The Telegram screen similarly keeps the bot token in DPAPI rather than YAML.
+When enabled in a future connection step, it will explain that the token comes
+from the official `@BotFather` flow and that the owner must allowlist their
+Telegram user ID. Neither value is requested by the generic Windows setup
+run, and no real Telegram verification is performed yet.
+
+If FunPay later rejects a configured session, the local session guard persists
+the `expired` state, blocks outbound FunPay replies, auto-replies, price/lot
+writes, and raises, and prevents an endless network retry loop. If Telegram
+is configured, the user-facing notification is:
+
+```text
+🔴 Требуется повторная авторизация FunPay
+
+Сессия больше не действует.
+Автоматические изменения остановлены.
+```
+
+Its **Как восстановить** action contains no cookie and directs the allowlisted
+private user to the local setup flow. Replacing the local DPAPI session marks a
+new reconnect attempt automatically; a successful read clears the blocked
+state without reinstalling the application.
 
 ## Seasonal data and description previews
 
