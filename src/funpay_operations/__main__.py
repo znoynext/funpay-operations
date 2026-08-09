@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 
 from .app import Application
 from .config import load_settings
+from .service_catalog import default_example_path, run_catalog_command
 from .funpay import build_read_client
 from .database import Database
 from .lot_discovery import OwnLotRegistryRepository, run_discovery
@@ -24,7 +25,8 @@ from .smoke import run_smoke_test
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the FunPay operations background scaffold.")
-    parser.add_argument("command", nargs="?", choices=["smoke-test", "discover-lots"], help="run a read-only local command")
+    parser.add_argument("command", nargs="?", choices=["smoke-test", "discover-lots", "catalog"], help="run a local command")
+    parser.add_argument("catalog_action", nargs="?", choices=["preview", "validate", "init-example"])
     parser.add_argument("--config", type=Path, help="YAML configuration path (takes priority over .env)")
     parser.add_argument("--env-file", type=Path, default=Path(".env"), help="dotenv configuration path")
     parser.add_argument("--once", action="store_true", help="Run one safe background cycle and exit")
@@ -41,6 +43,14 @@ def main() -> int:
     parser.add_argument(
         "--select-delves-template", action="store_true",
         help="prompt locally to select an already mapped Delves lot as an exemplar",
+    )
+    parser.add_argument(
+        "--catalog-file", type=Path, default=Path("data") / "service_catalog.json",
+        help="local ignored catalog definition path",
+    )
+    parser.add_argument(
+        "--catalog-database", type=Path, default=Path("data") / "service_catalog.sqlite3",
+        help="local ignored SQLite path for catalog entries",
     )
     args = parser.parse_args()
 
@@ -62,6 +72,13 @@ def main() -> int:
 
     load_dotenv(dotenv_path=args.env_file, override=False)
     config_path = args.config or Path(os.getenv("FUNPAY_MANAGER_CONFIG", "config.yaml"))
+    if args.command == "catalog":
+        if args.catalog_action is None:
+            parser.error("catalog requires preview, validate, or init-example")
+        return run_catalog_command(
+            args.catalog_action, catalog_path=args.catalog_file, database_path=args.catalog_database,
+            example_path=default_example_path(), output=sys.stdout,
+        )
     if args.command == "smoke-test":
         settings = load_settings(config_path=config_path, env_path=args.env_file)
         client = build_read_client(settings, SecretStore(settings.data_directory / "secrets.dpapi"))
