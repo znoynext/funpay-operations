@@ -121,6 +121,21 @@ and supports disable/remove actions. A changed title, form field, or form
 option invalidates its mapping and marks it `revalidation_required`; no
 automatic remapping occurs.
 
+## Local pricing engine
+
+`PricingEngine` is network-independent and uses integer minor units only. For
+an automatic lot its sole formula is `minimum_valid_trusted_price * 99 // 100`.
+It then rounds down to the configured FunPay minor-unit price step and applies
+an aligned hard floor. Only enabled, verified trusted sellers with a confirmed
+exact mapping, a matching currency, and a positive integer observation count.
+No market or unmapped seller input is used.
+
+Own-lot modes are `automatic`, `fixed_price`, `paused`, and `check_only`.
+Fixed lots use their local manual price; paused lots retain their current price;
+check-only lots calculate a target but return no update action. With no valid
+trusted observation the result is always `keep_current_price`. Batch previews
+are deterministic and make no writes.
+
 ## Seasonal data and description previews
 
 Public seasonal metadata lives under `seasonal_data/v1/` and includes only
