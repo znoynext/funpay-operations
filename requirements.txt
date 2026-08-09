@@ -1,2 +1,3 @@
+fpx-engine==0.7.4
 PyYAML>=6.0.2,<7
 python-dotenv>=1.0.1,<2

@@ -250,7 +250,7 @@ class PriceUpdateCoordinator:
         targets = tuple(
             (lot.lot_id, lot.price_state.service_code, lot.price_state.current_price_minor, decision.price_decision.final_target_minor)
             for lot, decision in zip(sorted(lots, key=lambda item: item.price_state.service_code), decisions)
-            if decision.price_decision.action is PriceAction.UPDATE_PRICE
+            if decision.price_decision.action in {PriceAction.UPDATE_PRICE, PriceAction.FIXED_PRICE}
             and decision.price_decision.final_target_minor != lot.price_state.current_price_minor
         )
         if mode is TransactionMode.DRY_RUN:

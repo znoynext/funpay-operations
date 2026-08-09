@@ -12,11 +12,18 @@ import json
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Mapping, Protocol, TextIO
+from typing import Mapping, TextIO
 
 from .database import Database
 from .funpay import FunPayClient
-from .lot_writes import CapabilityState, LotWriteCapability, LotWriteClient
+from .lot_writes import (
+    CapabilityState,
+    LotWriteCapability,
+    LotWriteClient,
+    LotWriteOutcome,
+    LotWriteResult,
+    MockLotWriteClient,
+)
 from .service_catalog import CatalogService, DesiredState, ServiceCatalogRepository
 
 
@@ -173,7 +180,6 @@ class LotSyncPlanner:
             }, requirements, "no confirmed lot mapping exists")
 
         current = candidates[0]
-        current_view = _current_view(current)
         changed: dict[str, object] = {}
         requirements: list[LotWriteCapability] = []
         if desired.category_node_id is not None and current.category_node_id != desired.category_node_id:
@@ -257,6 +263,107 @@ class LotSyncDryRunExecutor:
 
 class MockLotSyncExecutor(LotSyncDryRunExecutor):
     """Test double with no additional behavior or external dependency."""
+
+
+@dataclass(frozen=True)
+class MockLotSyncResult:
+    """Read-back evidence from a mock-only synchronization cycle."""
+
+    initial_plan: LotSyncPlan
+    write_results: tuple[LotWriteResult, ...]
+    reread_lots: tuple[CurrentLotState, ...]
+    verification_plan: LotSyncPlan
+    verified: bool
+
+
+class MockLotSyncCoordinator:
+    """Apply a plan to in-memory lots, reread them, and verify by replanning.
+
+    This coordinator accepts only ``MockLotWriteClient`` and cannot cross a
+    network boundary. Production lot writes remain hard-disabled.
+    """
+
+    def __init__(self, write_client: MockLotWriteClient) -> None:
+        if not isinstance(write_client, MockLotWriteClient):
+            raise ValueError("MockLotSyncCoordinator accepts MockLotWriteClient only")
+        self.write_client = write_client
+        self.planner = LotSyncPlanner(write_client)
+
+    def execute(
+        self, desired: tuple[DesiredLotState, ...], current: tuple[CurrentLotState, ...]
+    ) -> MockLotSyncResult:
+        initial = self.planner.plan(desired, current)
+        desired_by_code = {item.service_code: item for item in desired}
+        reread = list(current)
+        results: list[LotWriteResult] = []
+        for action in initial.actions:
+            if action.safety_status is not LotSyncSafety.DRY_RUN_ONLY:
+                continue
+            target = desired_by_code[action.service_code]
+            action_results = self._dispatch(initial.plan_id, action, target)
+            results.extend(action_results)
+            if action_results and all(item.outcome is LotWriteOutcome.SUCCEEDED for item in action_results):
+                reread = self._apply(reread, action, target)
+        reread_lots = tuple(sorted(reread, key=lambda item: item.lot_id))
+        verification = self.planner.plan(desired, reread_lots)
+        verified = all(action.decision is LotSyncDecision.ALREADY_CORRECT for action in verification.actions)
+        return MockLotSyncResult(initial, tuple(results), reread_lots, verification, verified)
+
+    def _dispatch(
+        self, plan_id: str, action: LotSyncAction, desired: DesiredLotState
+    ) -> tuple[LotWriteResult, ...]:
+        lot_id = str(action.current_state.get("lot_id", ""))
+        key_prefix = f"lot-sync:{plan_id}:{action.service_code}"
+        if action.decision is LotSyncDecision.CREATE_REQUIRED:
+            if desired.category_node_id is None or not desired.form_fields:
+                return ()
+            return (self.write_client.create_lot(
+                desired.category_node_id, desired.form_fields,
+                operation_key=f"{key_prefix}:create_lot",
+            ),)
+
+        calls: list[LotWriteResult] = []
+        for capability in action.capability_requirements:
+            operation_key = f"{key_prefix}:{capability.value}"
+            if capability is LotWriteCapability.UPDATE_TITLE and desired.title is not None:
+                calls.append(self.write_client.update_title(
+                    lot_id, desired.title, desired.title, operation_key=operation_key
+                ))
+            elif capability is LotWriteCapability.UPDATE_DESCRIPTION:
+                description, blocker = desired.description.resolved()
+                if blocker is None and description is not None:
+                    calls.append(self.write_client.update_description(
+                        lot_id, description, description, operation_key=operation_key
+                    ))
+            elif capability is LotWriteCapability.UPDATE_FIELDS:
+                fields = dict(desired.form_fields) or dict(desired.service.price_conditions)
+                if fields:
+                    calls.append(self.write_client.update_fields(lot_id, fields, operation_key=operation_key))
+            elif capability is LotWriteCapability.ENABLE_LOT:
+                calls.append(self.write_client.enable_lot(lot_id, operation_key=operation_key))
+            elif capability is LotWriteCapability.DISABLE_LOT:
+                calls.append(self.write_client.disable_lot(lot_id, operation_key=operation_key))
+        return tuple(calls)
+
+    @staticmethod
+    def _apply(
+        current: list[CurrentLotState], action: LotSyncAction, desired: DesiredLotState
+    ) -> list[CurrentLotState]:
+        lot_id = str(action.current_state.get("lot_id") or f"mock-{desired.service_code}")
+        previous = next((item for item in current if item.lot_id == lot_id), None)
+        description, _ = desired.description.resolved()
+        replacement = CurrentLotState(
+            lot_id=lot_id,
+            confirmed_service_code=desired.service_code,
+            title=desired.title or (previous.title if previous else desired.service_code),
+            description=description,
+            price_minor=previous.price_minor if previous else 0,
+            is_active=desired.service.desired_state is DesiredState.ENABLED,
+            category_node_id=desired.category_node_id,
+            form_fields=dict(desired.form_fields),
+            service_conditions=dict(desired.service.price_conditions),
+        )
+        return [item for item in current if item.lot_id != lot_id] + [replacement]
 
 
 class ConfirmedLotMappingRepository:
