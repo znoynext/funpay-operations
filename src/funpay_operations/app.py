@@ -15,6 +15,7 @@ from .repositories import AutoReplyRepository, DialogRepository, ReplyRepository
 from .setup_wizard import SecretStore
 from .telegram import build_telegram_bot
 from .tasks import BackgroundRunner
+from .runtime import SingletonProcessLock
 
 
 class Application:
@@ -53,6 +54,7 @@ class Application:
             settings, self.database, self.logger, funpay=self.funpay, telegram=self.telegram,
             notifications=self.notifications,
         )
+        self.process_lock = SingletonProcessLock(settings.data_directory / "funpay-operations.lock")
 
     @classmethod
     def from_files(cls, config_path: Path, env_path: Path) -> "Application":
@@ -63,6 +65,8 @@ class Application:
         self.database.initialize()
         self.logger.info("Application started in %s environment", self.settings.environment)
         try:
-            await self.runner.run(once=once)
+            with self.process_lock:
+                await self.runner.run(once=once)
         finally:
+            await self.runner.shutdown()
             self.funpay.close()

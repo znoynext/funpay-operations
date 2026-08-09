@@ -42,6 +42,8 @@ class Settings:
     funpay_message_notifications_enabled: bool = False
     funpay_message_poll_interval_seconds: int = 5
     funpay_auto_reply_enabled: bool = False
+    backup_retention_count: int = 7
+    backup_interval_seconds: int = 3600
 
 
 def _mapping(value: Any, field: str) -> dict[str, Any]:
@@ -98,6 +100,12 @@ def load_settings(*, config_path: Path, env_path: Path) -> Settings:
     logs_directory = _child_directory(data_directory, storage.get("logs_directory", "logs"), "storage.logs_directory")
     backups_directory = _child_directory(
         data_directory, storage.get("backups_directory", "backups"), "storage.backups_directory"
+    )
+    backup_retention_count = _positive_int(
+        storage.get("backup_retention_count", 7), "storage.backup_retention_count"
+    )
+    backup_interval_seconds = _positive_int(
+        storage.get("backup_interval_seconds", 3600), "storage.backup_interval_seconds"
     )
 
     raw_allowed_users = telegram.get("allowed_user_ids", [])
@@ -179,4 +187,6 @@ def load_settings(*, config_path: Path, env_path: Path) -> Settings:
         funpay_message_notifications_enabled=message_notifications_enabled,
         funpay_message_poll_interval_seconds=message_poll_interval,
         funpay_auto_reply_enabled=auto_reply_enabled,
+        backup_retention_count=backup_retention_count,
+        backup_interval_seconds=backup_interval_seconds,
     )

@@ -188,6 +188,26 @@ The existing fpx raise operation is account-wide, rather than per-lot. No
 production raise adapter is composed at this stage, and no real raise can be
 performed by this coordinator.
 
+## Background runtime infrastructure
+
+The application uses an advisory OS singleton lock in `data/`, an async task
+supervisor, per-task exponential backoff, reconnect hooks, heartbeats, and
+graceful cancellation. The FunPay message poller, Telegram poller, price
+scheduler, raise scheduler, and recovery coordinator are separate tasks.
+Disabled adapters are a healthy state and require no secrets; only task
+exceptions are retried with backoff.
+
+After a sleep/resume or Windows network-recovered signal, recovery always runs
+in this order: validate external sessions, catch up messages, refresh market,
+recalculate, verify own prices, then restore raise scheduling. The current
+hooks are intentionally disabled unless a later approved adapter is composed.
+
+SQLite maintenance performs `PRAGMA integrity_check` and creates local SQLite
+backups using the SQLite backup API. Backups remain under the ignored data
+directory; `storage.backup_retention_count` (default `7`) bounds retention and
+`storage.backup_interval_seconds` (default `3600`) controls the maintenance
+task. Application logs use the existing rotating local handler.
+
 ## Seasonal data and description previews
 
 Public seasonal metadata lives under `seasonal_data/v1/` and includes only
