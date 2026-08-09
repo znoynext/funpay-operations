@@ -164,6 +164,29 @@ can read each owned lot's category-node metadata, but this version never calls
 the library methods for pricing, creating, changing, enabling, disabling, or
 raising lots.
 
+## Lot write capabilities (technical layer only)
+
+`funpay_operations.lot_writes` defines the separate `LotWriteClient` contract
+and a native adapter for future lot changes. It recognizes the actual public
+`fpx-engine` methods for price, short title, description, enable/disable,
+creation, and account-wide raise. Generic field updates are marked unsupported:
+the pinned library has no public generic editor method. Raise is explicitly
+account-wide in fpx; it is not a targeted single-lot bump.
+
+Each capability reports `supported`, `unsupported`, or
+`unavailable_without_live_session`. Calls return a structured technical result:
+`requested`, `skipped`, `unsupported`, `succeeded`, `failed`, or
+`verification_required`. An in-memory `MockLotWriteClient` is used by CI.
+
+This release does **not** enable a production write. In `safe` mode every call
+is skipped. In `dry_run` it creates an in-memory adapter-operation plan without
+sending anything. A real fpx form includes live, dynamic editor state, so the
+plan intentionally represents the documented fpx method and validated
+arguments rather than a guessed HTTP payload. In `live` mode the adapter is
+architecturally present but returns `verification_required`: production network
+mutation is hard-disabled pending a separate approved step. No real FunPay
+session or write operation is needed for this layer.
+
 Run the read-only local integration check after storing the session:
 
 ```powershell
