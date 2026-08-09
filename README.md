@@ -136,6 +136,23 @@ check-only lots calculate a target but return no update action. With no valid
 trusted observation the result is always `keep_current_price`. Batch previews
 are deterministic and make no writes.
 
+## Pricing safety and market consensus
+
+`PriceObservationValidator` rejects observations with an unstable seller or
+lot ID, disabled/unverified seller, non-confirmed or wrong-service mapping,
+currency/price errors, material identity changes, or changed historical
+structure. `MarketConsensusEngine` marks an isolated low observation as
+`suspicious` and uses the next valid minimum instead. It accepts any size of
+real price decline when at least two independent sellers have a documented
+downward movement with unchanged lot identity; there is no maximum-drop cap.
+
+One seller needs consecutive close local observations with the same identity
+before its price is accepted. Safety outcomes are `valid`, `suspicious`,
+`rejected`, and `awaiting_confirmation`. The batch guard blocks a configurable
+number of simultaneous extreme downward targets that lack multi-seller
+consensus; its threshold is a risk signal, never a cap on consensus-confirmed
+volatility.
+
 ## Seasonal data and description previews
 
 Public seasonal metadata lives under `seasonal_data/v1/` and includes only
