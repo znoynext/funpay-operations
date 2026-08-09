@@ -154,6 +154,30 @@ class WindowsInfraTests(unittest.TestCase):
             self.assertEqual(installed_background.read_bytes(), b"background-v2")
             self.assertEqual(paths.secrets.read_bytes(), b"owner-secret-placeholder")
 
+    def test_installer_preserves_a_previous_setup_binary_that_may_be_open(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "source"
+            source.mkdir()
+            sources = []
+            for name in ("funpay-operations.exe", "funpay-operations-cli.exe", "funpay-operations-setup.exe"):
+                path = source / name
+                path.write_bytes(b"v1")
+                sources.append(path)
+            paths = resolve_windows_paths(root / "local")
+            installed = install_application(
+                paths, source_background=sources[0], source_cli=sources[1], source_setup=sources[2]
+            )
+            old_setup = installed[2].with_suffix(".exe.previous")
+            old_setup.write_bytes(b"an older running setup center")
+            for source in sources:
+                source.write_bytes(b"v2")
+
+            install_application(paths, source_background=sources[0], source_cli=sources[1], source_setup=sources[2])
+
+            self.assertEqual(installed[2].read_bytes(), b"v2")
+            self.assertEqual(old_setup.read_bytes(), b"an older running setup center")
+
     def test_empty_app_directory_is_repaired_from_three_binaries_and_staging_failure_preserves_update(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

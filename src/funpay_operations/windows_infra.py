@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import traceback
+from uuid import uuid4
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, TextIO
@@ -298,20 +299,22 @@ def install_application(
         raise WindowsSetupError("installer files are missing")
     paths.application.mkdir(parents=True, exist_ok=True)
     installed = tuple(paths.application / source.name for source in sources)
+    install_id = uuid4().hex
     staged: list[Path] = []
     backups: dict[Path, Path] = {}
     replaced: list[Path] = []
     try:
         for source, destination in zip(sources, installed, strict=True):
-            temporary = destination.with_suffix(destination.suffix + ".new")
-            temporary.unlink(missing_ok=True)
+            temporary = destination.with_suffix(destination.suffix + f".new.{install_id}")
             shutil.copyfile(source, temporary)
             if not _is_nonempty_file(temporary):
                 raise WindowsSetupError("application file staging failed")
             staged.append(temporary)
         for temporary, destination in zip(staged, installed, strict=True):
-            backup = destination.with_suffix(destination.suffix + ".previous")
-            backup.unlink(missing_ok=True)
+            # A prior Setup Center may still be running from a previous
+            # backup after a successful in-place update.  Never reuse its
+            # fixed backup path: Windows then rejects deleting the open EXE.
+            backup = destination.with_suffix(destination.suffix + f".previous.{install_id}")
             if destination.exists():
                 destination.replace(backup)
                 backups[destination] = backup
@@ -335,9 +338,17 @@ def install_application(
         raise
     finally:
         for temporary in staged:
-            temporary.unlink(missing_ok=True)
+            try:
+                temporary.unlink(missing_ok=True)
+            except PermissionError:
+                pass
         for backup in backups.values():
-            backup.unlink(missing_ok=True)
+            try:
+                backup.unlink(missing_ok=True)
+            except PermissionError:
+                # Retaining only the already-running old generic binary is
+                # safe; a later update can clean it up after the process exits.
+                pass
     return installed
 
 
