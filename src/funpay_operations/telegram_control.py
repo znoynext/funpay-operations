@@ -1,44 +1,194 @@
-"""Mock-ready Telegram control router with explicit confirmation barriers."""
+"""Compact, mock-ready Telegram control panel.
+
+Business services provide presentation models and perform named actions.  This
+module owns only navigation, safe opaque callbacks, confirmation barriers, and
+human-friendly rendering.  It deliberately has no FunPay or Telegram network
+dependency.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol
-from uuid import uuid4
 
 from .telegram import CommandReply, TelegramInteractionRouter, TelegramUpdate, TaskStateStore
+from .telegram_views import (
+    DashboardView,
+    FamilyView,
+    LotView,
+    MappingChoiceView,
+    PriceOverviewView,
+    PricePreviewView,
+    ReferencePriceView,
+    SellerCandidateView,
+    TrustedSellerView,
+    dashboard_text,
+    family_text,
+    lot_text,
+    mappings_text,
+    price_overview_text,
+    price_preview_text,
+    sellers_text,
+    seller_candidate_text,
+    settings_text,
+)
 
 
 CONTROL_MENU = {
     "keyboard": [
-        ["Статус"], ["Mythic+", "Delves"], ["Сообщения"], ["Проверить цены", "Обновить цены"],
-        ["Обновить и поднять"], ["Trusted sellers", "Лоты"], ["Rollback"], ["Pause", "Resume"],
-        ["Emergency stop"],
-    ], "resize_keyboard": True, "is_persistent": True,
+        ["⚔️ Mythic+", "🕳 Delves"],
+        ["💰 Цены", "💬 Сообщения"],
+        ["👥 Продавцы", "📦 Лоты"],
+        ["🔄 Обновить и поднять"],
+        ["⚙️ Настройки"],
+    ],
+    "resize_keyboard": True,
+    "is_persistent": True,
 }
-
-_ACTIONS = {
-    "Статус": "status", "Mythic+": "mythic_plus", "Delves": "delves", "Сообщения": "messages",
-    "Проверить цены": "check_prices", "Обновить цены": "update_prices", "Обновить и поднять": "update_raise",
-    "Trusted sellers": "trusted_sellers", "Лоты": "lots", "Rollback": "rollback", "Pause": "pause",
-    "Resume": "resume", "Emergency stop": "emergency_stop",
-}
-_CONFIRMATION_ACTIONS = {"mass_lot_sync", "mass_price_update", "rollback", "update_raise", "disable_lots"}
 
 
 class ControlService(Protocol):
+    """Service boundary consumed by the presentation router."""
+
     def execute(self, action: str, payload: str | None = None) -> str: ...
+    def dashboard(self, *, emergency_active: bool) -> DashboardView: ...
+    def family(self, family: str) -> FamilyView: ...
+    def lots(self, family: str | None = None) -> tuple[LotView, ...]: ...
+    def price_overview(self) -> PriceOverviewView: ...
+    def price_preview(self) -> PricePreviewView: ...
+    def sellers(self) -> tuple[TrustedSellerView, ...]: ...
+    def find_seller(self, nickname: str) -> SellerCandidateView | None: ...
+    def mapping_choices(self) -> tuple[MappingChoiceView, ...]: ...
+
+
+@dataclass(frozen=True)
+class _Intent:
+    action: str
+    payload: str | None = None
+
+
+@dataclass(frozen=True)
+class _CallbackEntry:
+    user_id: int
+    revision: int
+    intent: _Intent
 
 
 @dataclass
 class MockControlService:
-    """In-memory service-layer double; it never invokes external adapters."""
+    """Presentation/service double used by all non-live control flows."""
 
     calls: list[tuple[str, str | None]] = field(default_factory=list)
+    _lots: dict[str, LotView] = field(default_factory=dict)
+    _sellers: list[TrustedSellerView] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self._lots:
+            self._lots = {
+                "m10": LotView(
+                    "m10", "Mythic+", "Mythic+ +10", ("EU", "Self-play", "x1"), 149_000,
+                    "automatic", 100_000,
+                    (ReferencePriceView("Seller A", 151_000), ReferencePriceView("Seller B", 150_500)),
+                    "1505 ₽ × 0.99 = 1489 ₽", technical_detail="FunPay lot ID: mock-m10\nService code: hidden from the normal UI",
+                ),
+                "m12": LotView(
+                    "m12", "Mythic+", "Mythic+ +12", ("EU", "Self-play", "x1"), 210_000,
+                    "fixed_price", 150_000,
+                    (ReferencePriceView("Seller A", 210_000),), "Fixed price: 2100 ₽",
+                    technical_detail="FunPay lot ID: mock-m12\nService code: hidden from the normal UI",
+                ),
+                "d8": LotView(
+                    "d8", "Delves", "Bountiful Delve Tier 8", ("EU", "Self-play", "x1"), 99_000,
+                    "paused", 80_000, (), "Цена не меняется, пока лот приостановлен.",
+                    "Для расчёта нужен подтверждённый ориентир.",
+                    "FunPay lot ID: mock-d8\nService code: hidden from the normal UI",
+                ),
+            }
+        if not self._sellers:
+            self._sellers = [
+                TrustedSellerView("SellerOne", "Mythic+", True, True),
+                TrustedSellerView("SellerTwo", "Mythic+", True, True),
+                TrustedSellerView("SellerThree", "Delves", True, True),
+            ]
 
     def execute(self, action: str, payload: str | None = None) -> str:
         self.calls.append((action, payload))
+        if action in {"lot_automatic", "lot_fixed_price", "lot_paused", "lot_check_only"} and payload in self._lots:
+            self._lots[payload] = replace(self._lots[payload], mode=action.removeprefix("lot_"))
+        if action == "lot_set_fixed" and payload:
+            key, _, amount = payload.partition(":")
+            if key in self._lots and amount.isdecimal() and int(amount) > 0:
+                self._lots[key] = replace(self._lots[key], mode="fixed_price", price_minor=int(amount) * 100)
+        if action == "lot_set_floor" and payload:
+            key, _, amount = payload.partition(":")
+            if key in self._lots and amount.isdecimal() and int(amount) > 0:
+                self._lots[key] = replace(self._lots[key], hard_floor_minor=int(amount) * 100)
+        if action == "seller_add" and payload and not any(item.nickname.casefold() == payload.casefold() for item in self._sellers):
+            self._sellers.append(TrustedSellerView(payload, "Mythic+", True, True))
+        if action == "seller_remove" and payload:
+            self._sellers = [item for item in self._sellers if item.nickname != payload]
+        if action == "seller_disable" and payload:
+            self._sellers = [
+                replace(item, enabled=False) if item.nickname == payload else item for item in self._sellers
+            ]
         return f"mock:{action}"
+
+    def dashboard(self, *, emergency_active: bool) -> DashboardView:
+        lots = tuple(self._lots.values())
+        return DashboardView(
+            (
+                _status("Bot", "🟢 Готов"), _status("FunPay", "⚪ Не настроен"),
+                _status("Telegram", "⚪ Mock mode"), _status("Automation", "🟡 Safe mode"),
+                _status("Emergency stop", "🔴 Активен" if emergency_active else "🟢 Не активен"),
+            ),
+            sum(item.family == "Mythic+" for item in lots), sum(item.family == "Delves" for item in lots),
+            sum(item.warning is not None for item in lots), "Пока не выполнялось", "Пока не выполнялся", "Неизвестно",
+        )
+
+    def family(self, family: str) -> FamilyView:
+        lots = self.lots(family)
+        return FamilyView(
+            family, len(lots), sum(item.mode == "automatic" for item in lots),
+            sum(item.mode == "fixed_price" for item in lots), sum(item.mode == "paused" for item in lots),
+            sum(item.warning is not None for item in lots), "Пока не выполнялось", "Пока не выполнялся",
+        )
+
+    def lots(self, family: str | None = None) -> tuple[LotView, ...]:
+        return tuple(item for item in self._lots.values() if family is None or item.family == family)
+
+    def price_overview(self) -> PriceOverviewView:
+        lots = self.lots()
+        return PriceOverviewView(
+            sum(item.mode == "automatic" for item in lots), sum(item.mode == "fixed_price" for item in lots),
+            sum(item.mode == "paused" for item in lots), sum(item.warning is not None for item in lots), "Пока не выполнялось",
+        )
+
+    def price_preview(self) -> PricePreviewView:
+        from .telegram_views import PriceChangeView, PriceSkipView
+
+        return PricePreviewView(
+            (PriceChangeView("Mythic+ +10", 149_000, 142_000), PriceChangeView("Mythic+ +12", 210_000, 205_000)),
+            (PriceSkipView("Mythic+ +8", "fixed price"), PriceSkipView("Mythic+ +9", "подозрительный ориентир")),
+        )
+
+    def sellers(self) -> tuple[TrustedSellerView, ...]:
+        return tuple(self._sellers)
+
+    def find_seller(self, nickname: str) -> SellerCandidateView | None:
+        clean = nickname.strip()[:64]
+        return SellerCandidateView(clean, True) if clean else None
+
+    def mapping_choices(self) -> tuple[MappingChoiceView, ...]:
+        return (
+            MappingChoiceView("Mythic+ +10", "EU • Self-play • x1"),
+            MappingChoiceView("Mythic+ +10 package", "EU • Self-play • x3"),
+        )
+
+
+def _status(label: str, value: str):
+    from .telegram_views import StatusView
+
+    return StatusView(label, value)
 
 
 class EmergencyStopGate:
@@ -51,6 +201,9 @@ class EmergencyStopGate:
 
     def engage(self) -> None:
         self.states.save("emergency_stop", "active")
+
+    def release(self) -> None:
+        self.states.save("emergency_stop", "inactive")
 
     def active(self) -> bool:
         state = self.states.load("emergency_stop")
@@ -73,79 +226,414 @@ class CompositeTelegramRouter:
 
 
 class TelegramControlRouter:
-    """Private menu control; writes require a callback confirmation and gate check."""
+    """Private, button-first dashboard with opaque, per-user callbacks."""
+
+    _TEXT_ACTIONS = {
+        "⚔️ mythic+": _Intent("family", "Mythic+"), "mythic+": _Intent("family", "Mythic+"),
+        "🕳 delves": _Intent("family", "Delves"), "delves": _Intent("family", "Delves"),
+        "💰 цены": _Intent("prices"), "💬 сообщения": _Intent("messages"),
+        "👥 продавцы": _Intent("sellers"), "trusted sellers": _Intent("sellers"),
+        "📦 лоты": _Intent("lots"), "🔄 обновить и поднять": _Intent("update_raise_preview"),
+        "⚙️ настройки": _Intent("settings"), "статус": _Intent("home"),
+        "/start": _Intent("home"), "/status": _Intent("home"),
+        "обновить цены": _Intent("price_preview"), "проверить цены": _Intent("check_prices"),
+        "rollback": _Intent("rollback_preview"), "emergency stop": _Intent("emergency_preview"),
+        "pause": _Intent("pause"), "resume": _Intent("resume_preview"),
+    }
 
     def __init__(self, allowed_user_ids: tuple[int, ...], states: TaskStateStore,
                  services: ControlService, gate: EmergencyStopGate) -> None:
         self.allowed = frozenset(allowed_user_ids)
         self.states, self.services, self.gate = states, services, gate
-        self.pending: dict[str, str] = {}
+        self._callbacks: dict[str, _CallbackEntry] = {}
+        self._tokens_by_user: dict[int, set[str]] = {}
+        self._revisions: dict[int, int] = {}
+        self._input_modes: dict[int, tuple[str, str | None]] = {}
+        self._next_token = 0
 
     def handle(self, update: TelegramUpdate) -> CommandReply | None:
         if update.user_id not in self.allowed or update.chat_id != update.user_id:
             return None
-        if update.callback_data:
-            return self._callback(update.callback_data)
-        action = _ACTIONS.get((update.text or "").strip())
-        if action is None:
+        if update.callback_data is not None:
+            return self._callback(update.user_id, update.callback_data)
+        text = (update.text or "").strip()
+        if not text:
             return None
-        if action == "emergency_stop":
-            self.gate.engage()
-            return CommandReply("Emergency stop active: outbound automation is blocked.", show_menu=True, reply_markup=CONTROL_MENU)
+        if update.user_id in self._input_modes and not text.startswith("/"):
+            return self._safe_input(update.user_id, text)
+        intent = self._TEXT_ACTIONS.get(text.casefold())
+        if intent is None:
+            return None
+        return self._dispatch_safe(update.user_id, intent, edit=False)
+
+    def _callback(self, user_id: int, data: str) -> CommandReply | None:
+        if not data.startswith("ux:"):
+            return None
+        token = data.removeprefix("ux:")
+        if len(token) > 12 or not token.isascii() or not token.isalnum():
+            return self._stale(user_id)
+        entry = self._callbacks.get(token)
+        if entry is None or entry.user_id != user_id or entry.revision != self._revisions.get(user_id):
+            return self._stale(user_id)
+        # A navigation callback always leaves text-entry mode.  Otherwise a
+        # later ordinary message could be misinterpreted as stale form input.
+        self._input_modes.pop(user_id, None)
+        return self._dispatch_safe(user_id, entry.intent, edit=True)
+
+    def _dispatch_safe(self, user_id: int, intent: _Intent, *, edit: bool) -> CommandReply:
+        try:
+            return self._dispatch(user_id, intent, edit=edit)
+        except (RuntimeError, ValueError):
+            return self._service_error(user_id, edit=edit)
+
+    def _safe_input(self, user_id: int, text: str) -> CommandReply:
+        try:
+            return self._input(user_id, text)
+        except (RuntimeError, ValueError):
+            return self._service_error(user_id)
+
+    def _input(self, user_id: int, text: str) -> CommandReply:
+        mode, payload = self._input_modes.pop(user_id)
+        if mode == "seller_add":
+            if len(text) > 64 or "\r" in text or "\n" in text:
+                return self._render(user_id, "Ник должен быть одной строкой до 64 символов.", [
+                    [("Попробовать снова", _Intent("seller_add_input")), ("Назад", _Intent("sellers"))],
+                ])
+            candidate = self.services.find_seller(text)
+            if candidate is None:
+                return self._render(user_id, "Не удалось найти профиль. Проверьте ник и попробуйте снова.", [
+                    [("Попробовать снова", _Intent("seller_add_input")), ("Назад", _Intent("sellers"))],
+                ])
+            return self._render(user_id, seller_candidate_text(candidate), [
+                [("✅ Добавить", _Intent("confirm", f"seller_add:{candidate.nickname}")), ("❌ Отмена", _Intent("sellers"))],
+            ])
+        if mode in {"fixed_price", "hard_floor"} and payload:
+            if not 1 <= len(text) <= 8 or not text.isdecimal() or not 1 <= int(text) <= 10_000_000:
+                return self._render(user_id, "Введите цену целым числом в рублях.", [
+                    [("Повторить", _Intent("lot_input", f"{mode}:{payload}")), ("Назад", _Intent("lot", payload))],
+                ])
+            action = "lot_set_fixed" if mode == "fixed_price" else "lot_set_floor"
+            self._run(action, f"{payload}:{text}")
+            return self._lot_screen(user_id, payload)
+        return self._stale(user_id)
+
+    def _dispatch(self, user_id: int, intent: _Intent, *, edit: bool) -> CommandReply:
+        action, payload = intent.action, intent.payload
+        if action == "home":
+            return self._home(user_id, edit=edit)
+        if action == "family" and payload:
+            return self._family_screen(user_id, payload, edit=edit)
+        if action == "lots":
+            return self._lots_screen(user_id, None, edit=edit)
+        if action == "family_lots" and payload:
+            return self._lots_screen(user_id, payload, edit=edit)
+        if action == "lot" and payload:
+            return self._lot_screen(user_id, payload, edit=edit)
+        if action == "prices":
+            return self._prices_screen(user_id, edit=edit)
+        if action == "price_preview":
+            return self._price_preview_screen(user_id, edit=edit)
+        if action == "check_prices":
+            return self._run_readonly(user_id, "check_prices", "Проверка цен запущена. Это только чтение.", edit=edit)
+        if action == "rollback_preview":
+            return self._confirm_screen(user_id, "rollback", "↩️ Rollback", "Будут восстановлены последние подтверждённые цены.", edit=edit)
+        if action == "update_raise_preview":
+            return self._confirm_screen(user_id, "update_raise", "🔄 Обновить и поднять", "Сначала будут проверены цены, затем — доступность raise.", edit=edit)
+        if action == "sellers":
+            return self._sellers_screen(user_id, edit=edit)
+        if action == "seller_add_input":
+            self._input_modes[user_id] = ("seller_add", None)
+            return self._render(user_id, "Введите ник продавца", [[("Назад", _Intent("sellers"))]], edit=edit)
+        if action == "seller_remove_select":
+            return self._seller_remove_screen(user_id, edit=edit)
+        if action == "seller_disable_select":
+            return self._seller_disable_screen(user_id, edit=edit)
+        if action == "mappings":
+            return self._mappings_screen(user_id, edit=edit)
+        if action == "seller_recheck":
+            return self._run_then_sellers(user_id, "seller_recheck", edit=edit)
+        if action == "seller_remap" and payload:
+            return self._run_then_sellers(user_id, "seller_remap", payload, edit=edit)
+        if action == "seller_disable" and payload:
+            return self._run_then_sellers(user_id, "seller_disable", payload, edit=edit)
+        if action == "messages":
+            return self._messages_screen(user_id, edit=edit)
+        if action == "settings":
+            return self._settings_screen(user_id, edit=edit)
+        if action == "automation":
+            return self._automation_screen(user_id, edit=edit)
+        if action == "notifications":
+            return self._simple_screen(user_id, "🔔 Уведомления\n\nВключаются только значимые события: новое сообщение, истёкшая сессия, критическая ошибка, ошибка проверки цены, blocked batch, rollback, raise failure и emergency stop.", _Intent("settings"), edit=edit)
+        if action == "catalog":
+            return self._simple_screen(user_id, "📚 Service catalog\n\nКаталог настраивается локально. Здесь будут показаны человекочитаемые услуги и шаблоны.", _Intent("settings"), edit=edit)
+        if action == "diagnostics":
+            return self._simple_screen(user_id, "🩺 Диагностика\n\nMock mode готов. FunPay и Telegram secrets пока не настроены.", _Intent("settings"), edit=edit)
+        if action == "about":
+            return self._simple_screen(user_id, "ℹ️ FunPay Bot\n\nПанель работает в mock mode. Live writes не разрешены.", _Intent("settings"), edit=edit)
         if action == "pause":
             self.states.save("operations", "paused")
-            return CommandReply("Operations paused.", show_menu=True, reply_markup=CONTROL_MENU)
-        if action == "resume":
-            self.states.save("operations", "active")
-            return CommandReply("Operations resumed; emergency stop remains independent.", show_menu=True, reply_markup=CONTROL_MENU)
-        if action == "status":
-            return CommandReply(self.services.execute("status"), show_menu=True, reply_markup=CONTROL_MENU)
-        if action == "update_prices":
-            return self._confirm("mass_price_update")
-        if action == "update_raise":
-            return self._confirm("update_raise")
-        if action == "rollback":
-            return self._confirm("rollback")
-        if action == "lots":
-            return self._confirm("mass_lot_sync")
-        return CommandReply(self.services.execute(action), show_menu=True, reply_markup=CONTROL_MENU)
+            self._run("pause")
+            return self._automation_screen(user_id, edit=edit)
+        if action == "resume_preview":
+            return self._confirm_screen(user_id, "resume", "▶️ Возобновить", "Автоматизация снова сможет планировать разрешённые действия.", edit=edit)
+        if action == "auto_reply_toggle":
+            current = self.states.load("funpay_auto_reply")
+            enabled = not bool(current and current[0] == "enabled")
+            self.states.save("funpay_auto_reply", "enabled" if enabled else "disabled")
+            self._run("auto_reply_toggle")
+            return self._settings_screen(user_id, edit=edit)
+        if action == "emergency_preview":
+            return self._confirm_screen(
+                user_id, "emergency_engage", "⚠️ Emergency Stop",
+                "Будут остановлены:\n• изменение цен;\n• изменение лотов;\n• raise;\n• автоответ;\n• автоматические исходящие действия.\n\nВходящие уведомления продолжат работать.",
+                confirm_label="🛑 Остановить", edit=edit,
+            )
+        if action == "lot_mode" and payload:
+            return self._lot_mode_screen(user_id, payload, edit=edit)
+        if action == "lot_input" and payload:
+            mode, _, key = payload.partition(":")
+            self._input_modes[user_id] = (mode, key)
+            prompt = "Введите fixed price в рублях" if mode == "fixed_price" else "Введите hard floor в рублях"
+            return self._render(user_id, prompt, [[("Назад", _Intent("lot", key))]], edit=edit)
+        if action == "lot_check" and payload:
+            return self._run_readonly(user_id, "lot_check", "Проверка лота запущена. Это только чтение.", payload, edit=edit)
+        if action == "lot_decision" and payload:
+            self._run("lot_decision", payload)
+            return self._lot_screen(user_id, payload, edit=edit)
+        if action == "lot_detail" and payload:
+            lot = self._lot(payload)
+            detail = lot.technical_detail or "Технические данные пока недоступны."
+            return self._render(user_id, f"Подробнее\n\n{detail}", [[("Назад", _Intent("lot", payload))]], edit=edit)
+        if action.startswith("lot_") and payload:
+            self._run(action, payload)
+            return self._lot_screen(user_id, payload, edit=edit)
+        if action == "confirm" and payload:
+            return self._execute_confirmed(user_id, payload, edit=edit)
+        if action == "cancel":
+            return self._home(user_id, edit=edit, notice="Операция отменена.")
+        if action == "refresh":
+            return self._home(user_id, edit=edit)
+        return self._stale(user_id)
 
-    def _confirm(self, action: str) -> CommandReply:
-        token = uuid4().hex
-        self.pending[token] = action
-        return CommandReply(
-            f"Confirm {action}?", reply_markup={"inline_keyboard": [[
-                {"text": "Confirm", "callback_data": f"control_confirm:{token}"},
-                {"text": "Cancel", "callback_data": f"control_cancel:{token}"},
-            ]]},
+    def _home(self, user_id: int, *, edit: bool, notice: str | None = None) -> CommandReply:
+        text = dashboard_text(self.services.dashboard(emergency_active=self.gate.active()), emergency_active=self.gate.active())
+        if notice:
+            text = f"{notice}\n\n{text}"
+        rows = [
+            [("⚔️ Mythic+", _Intent("family", "Mythic+")), ("🕳 Delves", _Intent("family", "Delves"))],
+            [("💰 Цены", _Intent("prices")), ("💬 Сообщения", _Intent("messages"))],
+            [("👥 Продавцы", _Intent("sellers")), ("📦 Лоты", _Intent("lots"))],
+            [("🔄 Обновить и поднять", _Intent("update_raise_preview"))],
+            [("⚙️ Настройки", _Intent("settings"))],
+        ]
+        if self.gate.active():
+            rows.append([("▶️ Возобновить", _Intent("resume_preview"))])
+        return self._render(user_id, text, rows, edit=edit)
+
+    def _family_screen(self, user_id: int, family: str, *, edit: bool) -> CommandReply:
+        return self._render(user_id, family_text(self.services.family(family)), [
+            [("📦 Лоты", _Intent("family_lots", family)), ("💰 Проверить цены", _Intent("check_prices"))],
+            [("💸 Обновить цены", _Intent("price_preview")), ("🔄 Обновить и поднять", _Intent("update_raise_preview"))],
+            [("⚙️ Настройки family", _Intent("settings"))],
+            _nav(),
+        ], edit=edit)
+
+    def _lots_screen(self, user_id: int, family: str | None, *, edit: bool) -> CommandReply:
+        lots = self.services.lots(family)
+        heading = f"📦 Лоты — {family}" if family else "📦 Лоты"
+        rows = [[(item.title, _Intent("lot", item.key))] for item in lots]
+        if not rows:
+            rows.append([("Обновить", _Intent("refresh"))])
+        rows.append(_nav(_Intent("family", family) if family else _Intent("home")))
+        return self._render(user_id, f"{heading}\n\nВыберите лот, чтобы посмотреть цену, режим и решение.", rows, edit=edit)
+
+    def _lot_screen(self, user_id: int, key: str, *, edit: bool = True) -> CommandReply:
+        lot = self._lot(key)
+        return self._render(user_id, lot_text(lot), [
+            [("Режим", _Intent("lot_mode", key)), ("Fixed price", _Intent("lot_input", f"fixed_price:{key}"))],
+            [("Hard floor", _Intent("lot_input", f"hard_floor:{key}")), ("Проверить сейчас", _Intent("lot_check", key))],
+            [("Решение по цене", _Intent("lot_decision", key)), ("Подробнее", _Intent("lot_detail", key))],
+            [("▶️ Resume" if lot.mode == "paused" else "⏸ Pause", _Intent("lot_automatic" if lot.mode == "paused" else "lot_paused", key))],
+            _nav(_Intent("family_lots", lot.family)),
+        ], edit=edit)
+
+    def _lot_mode_screen(self, user_id: int, key: str, *, edit: bool) -> CommandReply:
+        return self._render(user_id, "Выберите режим лота. Изменение будет применено только к этому лоту.", [
+            [("🟢 Automatic", _Intent("lot_automatic", key)), ("🔵 Fixed price", _Intent("lot_fixed_price", key))],
+            [("⏸ Paused", _Intent("lot_paused", key)), ("🟡 Check only", _Intent("lot_check_only", key))],
+            _nav(_Intent("lot", key)),
+        ], edit=edit)
+
+    def _prices_screen(self, user_id: int, *, edit: bool) -> CommandReply:
+        return self._render(user_id, price_overview_text(self.services.price_overview()), [
+            [("Проверить сейчас", _Intent("check_prices")), ("Обновить цены", _Intent("price_preview"))],
+            [("Решения по лотам", _Intent("lots")), ("Rollback", _Intent("rollback_preview"))],
+            _nav(),
+        ], edit=edit)
+
+    def _price_preview_screen(self, user_id: int, *, edit: bool) -> CommandReply:
+        return self._render(user_id, price_preview_text(self.services.price_preview()), [
+            [("✅ Подтвердить", _Intent("confirm", "mass_price_update")), ("❌ Отмена", _Intent("cancel"))],
+            _nav(_Intent("prices")),
+        ], edit=edit)
+
+    def _sellers_screen(self, user_id: int, *, edit: bool) -> CommandReply:
+        return self._render(user_id, sellers_text(self.services.sellers()), [
+            [("Добавить", _Intent("seller_add_input")), ("Удалить", _Intent("seller_remove_select"))],
+            [("Отключить", _Intent("seller_disable_select")), ("Проверить", _Intent("seller_recheck"))],
+            [("Соответствия", _Intent("mappings"))],
+            _nav(),
+        ], edit=edit)
+
+    def _seller_remove_screen(self, user_id: int, *, edit: bool) -> CommandReply:
+        rows = [[(item.nickname, _Intent("confirm", f"seller_remove:{item.nickname}"))] for item in self.services.sellers()]
+        rows.append(_nav(_Intent("sellers")))
+        return self._render(user_id, "Выберите продавца для удаления.", rows, edit=edit)
+
+    def _seller_disable_screen(self, user_id: int, *, edit: bool) -> CommandReply:
+        rows = [[(item.nickname, _Intent("seller_disable", item.nickname))] for item in self.services.sellers() if item.enabled]
+        rows.append(_nav(_Intent("sellers")))
+        return self._render(user_id, "Выберите продавца для отключения.", rows, edit=edit)
+
+    def _mappings_screen(self, user_id: int, *, edit: bool) -> CommandReply:
+        choices = self.services.mapping_choices()
+        rows = [[(item.label, _Intent("seller_remap", item.label))] for item in choices]
+        rows.append(_nav(_Intent("sellers")))
+        return self._render(user_id, mappings_text(choices), rows, edit=edit)
+
+    def _messages_screen(self, user_id: int, *, edit: bool) -> CommandReply:
+        return self._render(user_id, "💬 Сообщения\n\nНовые сообщения приходят отдельными компактными уведомлениями. Нажмите «Ответить» прямо под нужным уведомлением.", [
+            [("🏠 Главная", _Intent("home"))],
+        ], edit=edit)
+
+    def _settings_screen(self, user_id: int, *, edit: bool) -> CommandReply:
+        auto_reply = self.states.load("funpay_auto_reply")
+        text = settings_text(bool(auto_reply and auto_reply[0] == "enabled"))
+        return self._render(user_id, text, [
+            [("Автоматизация", _Intent("automation")), ("Автоответ", _Intent("auto_reply_toggle"))],
+            [("Уведомления", _Intent("notifications")), ("Каталог услуг", _Intent("catalog"))],
+            [("Минимальные цены", _Intent("lots")), ("Диагностика", _Intent("diagnostics"))],
+            [("Информация о боте", _Intent("about"))],
+            [("⚠️ Emergency stop", _Intent("emergency_preview"))],
+            _nav(),
+        ], edit=edit)
+
+    def _automation_screen(self, user_id: int, *, edit: bool) -> CommandReply:
+        state = self.states.load("operations")
+        paused = bool(state and state[0] == "paused")
+        text = f"⚙️ Автоматизация\n\nСостояние: {'⏸ Приостановлена' if paused else '🟢 Готова'}"
+        rows = [[("▶️ Resume", _Intent("resume_preview")) if paused else ("⏸ Pause", _Intent("pause"))], _nav(_Intent("settings"))]
+        return self._render(user_id, text, rows, edit=edit)
+
+    def _simple_screen(self, user_id: int, text: str, back: _Intent, *, edit: bool) -> CommandReply:
+        return self._render(user_id, text, [_nav(back)], edit=edit)
+
+    def _service_error(self, user_id: int, *, edit: bool = False) -> CommandReply:
+        return self._render(
+            user_id, "Не удалось выполнить действие. Ничего не подтверждено как изменённое.",
+            [[("Обновить", _Intent("refresh"))]], edit=edit,
         )
 
-    def _callback(self, data: str) -> CommandReply | None:
-        action, separator, token = data.partition(":")
-        if action == "control_action" and separator:
-            if token == "disable_lots":
-                return self._confirm("disable_lots")
-            if token in {
-                "seller_add", "seller_remove", "seller_disable", "seller_recheck", "seller_remap",
-                "lot_automatic", "lot_fixed_price", "lot_paused", "lot_check_only", "lot_hard_floor", "lot_decision",
-            }:
-                return CommandReply(self.services.execute(token), show_menu=True, reply_markup=CONTROL_MENU)
-            return CommandReply("Control is unavailable.")
-        if not separator or not token or action not in {"control_confirm", "control_cancel"}:
-            return None
-        pending = self.pending.pop(token, None)
-        if pending is None:
-            return CommandReply("Confirmation is unavailable.")
-        if action == "control_cancel":
-            return CommandReply("Operation cancelled.", show_menu=True, reply_markup=CONTROL_MENU)
-        operation = _gate_operation(pending)
+    def _run_then_sellers(self, user_id: int, action: str, payload: str | None = None, *, edit: bool) -> CommandReply:
+        try:
+            self._run(action, payload)
+        except RuntimeError:
+            return self._render(user_id, "Не удалось выполнить действие. Попробуйте обновить экран позже.", [[("Обновить", _Intent("sellers"))]], edit=edit)
+        return self._sellers_screen(user_id, edit=edit)
+
+    def _confirm_screen(self, user_id: int, action: str, title: str, body: str, *,
+                        confirm_label: str = "✅ Подтвердить", edit: bool) -> CommandReply:
+        return self._render(user_id, f"{title}\n\n{body}\n\nПосле подтверждения будет выполнена операция.", [
+            [(confirm_label, _Intent("confirm", action)), ("Отмена", _Intent("cancel"))],
+            _nav(),
+        ], edit=edit)
+
+    def _execute_confirmed(self, user_id: int, action: str, *, edit: bool) -> CommandReply:
+        if action == "emergency_engage":
+            self.gate.engage()
+            return self._home(user_id, edit=edit, notice="🛑 Emergency stop активирован. Исходящие автоматические действия заблокированы.")
+        if action == "resume":
+            self.gate.release()
+            self.states.save("operations", "active")
+            self._run("resume")
+            return self._home(user_id, edit=edit, notice="▶️ Automation resumed.")
+        if action.startswith("seller_add:"):
+            nickname = action.partition(":")[2]
+            self._run("seller_add", nickname)
+            return self._sellers_screen(user_id, edit=edit)
+        if action.startswith("seller_remove:"):
+            nickname = action.partition(":")[2]
+            self._run("seller_remove", nickname)
+            return self._sellers_screen(user_id, edit=edit)
+        operation = _gate_operation(action)
         if not self.gate.permits(operation):
-            return CommandReply("Emergency stop blocks this outbound operation.", show_menu=True, reply_markup=CONTROL_MENU)
-        return CommandReply(self.services.execute(pending), show_menu=True, reply_markup=CONTROL_MENU)
+            return self._render(user_id, "🛑 Emergency stop блокирует это исходящее действие.", [[("🏠 Главная", _Intent("home"))]], edit=edit)
+        labels = {
+            "mass_price_update": "✅ Обновление цен передано на выполнение.",
+            "update_raise": "✅ Обновление и raise переданы на выполнение.",
+            "rollback": "✅ Rollback передан на выполнение.",
+            "mass_lot_sync": "✅ Синхронизация лотов передана на выполнение.",
+            "disable_lots": "✅ Отключение лотов передано на выполнение.",
+        }
+        self._run(action)
+        return self._home(user_id, edit=edit, notice=labels.get(action, "Операция выполнена."))
+
+    def _run_readonly(self, user_id: int, action: str, notice: str, payload: str | None = None, *, edit: bool) -> CommandReply:
+        try:
+            self._run(action, payload)
+        except RuntimeError:
+            return self._render(user_id, "Не удалось выполнить проверку. Попробуйте обновить экран позже.", [[("Обновить", _Intent("refresh"))]], edit=edit)
+        return self._home(user_id, edit=edit, notice=f"✅ {notice}")
+
+    def _run(self, action: str, payload: str | None = None) -> str:
+        try:
+            return self.services.execute(action, payload)
+        except Exception as error:
+            raise RuntimeError("control service failed") from error
+
+    def _render(self, user_id: int, text: str, rows: list[list[tuple[str, _Intent]]], *,
+                edit: bool = False, show_menu: bool = False) -> CommandReply:
+        revision = self._revisions.get(user_id, 0) + 1
+        self._revisions[user_id] = revision
+        for token in self._tokens_by_user.pop(user_id, set()):
+            self._callbacks.pop(token, None)
+        keyboard: list[list[dict[str, str]]] = []
+        tokens: set[str] = set()
+        for row in rows:
+            rendered_row: list[dict[str, str]] = []
+            for label, intent in row:
+                token = self._new_token()
+                tokens.add(token)
+                self._callbacks[token] = _CallbackEntry(user_id, revision, intent)
+                rendered_row.append({"text": label, "callback_data": f"ux:{token}"})
+            keyboard.append(rendered_row)
+        self._tokens_by_user[user_id] = tokens
+        markup = CONTROL_MENU if show_menu else {"inline_keyboard": keyboard}
+        return CommandReply(text, show_menu=show_menu, reply_markup=markup, edit_message=edit)
+
+    def _stale(self, user_id: int) -> CommandReply:
+        return self._render(
+            user_id, "Этот экран устарел. Нажмите «Обновить», чтобы получить актуальное состояние.",
+            [[("Обновить", _Intent("refresh"))]], edit=True,
+        )
+
+    def _lot(self, key: str) -> LotView:
+        for item in self.services.lots():
+            if item.key == key:
+                return item
+        raise RuntimeError("lot is unavailable")
+
+    def _new_token(self) -> str:
+        self._next_token += 1
+        return format(self._next_token, "x")
+
+
+def _nav(back: _Intent | None = None) -> list[tuple[str, _Intent]]:
+    return [("Назад", back or _Intent("home")), ("🏠 Главная", _Intent("home"))]
 
 
 def _gate_operation(action: str) -> str:
     return {
         "mass_lot_sync": "lot_writes", "mass_price_update": "price_writes", "update_raise": "raise",
         "rollback": "price_writes", "disable_lots": "lot_writes",
-    }[action]
+    }.get(action, "automated_messages")

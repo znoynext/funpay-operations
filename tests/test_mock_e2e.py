@@ -421,45 +421,50 @@ class TelegramControlMockE2ETests(unittest.TestCase):
         self.temporary_directory.cleanup()
 
     def test_entire_menu_confirmation_allowlist_and_emergency_gate(self) -> None:
-        labels = (
-            "Статус", "Mythic+", "Delves", "Сообщения", "Проверить цены",
-            "Обновить цены", "Обновить и поднять", "Trusted sellers", "Лоты",
-            "Rollback", "Pause", "Resume",
-        )
-        updates = tuple(TelegramUpdate(index, 1001, 1001, label) for index, label in enumerate(labels, 1))
-        updates += (TelegramUpdate(20, 2002, 2002, "Обновить цены"),)
-        self.api.update_batches.append(updates)
+        def callback(markup: dict[str, object], label: str) -> str:
+            for row in markup["inline_keyboard"]:  # type: ignore[index]
+                for button in row:
+                    if button["text"] == label:
+                        return button["callback_data"]
+            raise AssertionError(f"missing button: {label}")
+
+        self.api.update_batches.append((TelegramUpdate(1, 1001, 1001, "💰 Цены"),))
         self.bot.poll_once()
-
-        expected_reads = {
-            "status", "mythic_plus", "delves", "messages", "check_prices", "trusted_sellers"
-        }
-        self.assertTrue(expected_reads.issubset({item[0] for item in self.service.calls}))
-        self.assertNotIn("mass_price_update", {item[0] for item in self.service.calls})
-
-        confirmations = [
-            markup["inline_keyboard"][0][0]["callback_data"]
-            for _, _, markup in self.api.sent_messages
-            if markup and "inline_keyboard" in markup
-        ]
-        self.api.update_batches.append(tuple(
-            TelegramUpdate(30 + index, 1001, 1001, None, callback_data=callback)
-            for index, callback in enumerate(confirmations)
-        ))
+        price_message_id = self.api.next_message_id - 1
+        preview = callback(self.api.sent_messages[-1][2], "Обновить цены")
+        self.api.update_batches.append((TelegramUpdate(2, 1001, 1001, None, price_message_id, preview),))
         self.bot.poll_once()
-        confirmed = {item[0] for item in self.service.calls}
-        self.assertTrue({"mass_price_update", "update_raise", "mass_lot_sync", "rollback"}.issubset(confirmed))
+        confirm = callback(self.api.edited_messages[-1][3], "✅ Подтвердить")
+        self.api.update_batches.append((TelegramUpdate(3, 1001, 1001, None, price_message_id, confirm),))
+        self.bot.poll_once()
+        self.assertIn(("mass_price_update", None), self.service.calls)
 
-        self.api.update_batches.append((TelegramUpdate(50, 1001, 1001, "Emergency stop"),))
+        self.api.update_batches.append((TelegramUpdate(4, 1001, 1001, "⚙️ Настройки"),))
+        self.bot.poll_once()
+        settings_message_id = self.api.next_message_id - 1
+        emergency = callback(self.api.sent_messages[-1][2], "⚠️ Emergency stop")
+        self.api.update_batches.append((TelegramUpdate(5, 1001, 1001, None, settings_message_id, emergency),))
+        self.bot.poll_once()
+        stop = callback(self.api.edited_messages[-1][3], "🛑 Остановить")
+        self.api.update_batches.append((TelegramUpdate(6, 1001, 1001, None, settings_message_id, stop),))
         self.bot.poll_once()
         self.assertTrue(self.gate.active())
         self.assertTrue(self.gate.permits("incoming_notifications"))
         self.assertFalse(self.gate.permits("lot_writes"))
+
         calls_before = len(self.service.calls)
-        self.api.update_batches.append((TelegramUpdate(51, 1001, 1001, "Обновить цены"),))
+        self.api.update_batches.append((TelegramUpdate(7, 1001, 1001, "💰 Цены"),))
         self.bot.poll_once()
-        callback = self.api.sent_messages[-1][2]["inline_keyboard"][0][0]["callback_data"]
-        self.api.update_batches.append((TelegramUpdate(52, 1001, 1001, None, callback_data=callback),))
+        blocked_message_id = self.api.next_message_id - 1
+        preview = callback(self.api.sent_messages[-1][2], "Обновить цены")
+        self.api.update_batches.append((TelegramUpdate(8, 1001, 1001, None, blocked_message_id, preview),))
+        self.bot.poll_once()
+        confirm = callback(self.api.edited_messages[-1][3], "✅ Подтвердить")
+        self.api.update_batches.append((TelegramUpdate(9, 1001, 1001, None, blocked_message_id, confirm),))
+        self.bot.poll_once()
+        self.assertEqual(len(self.service.calls), calls_before)
+
+        self.api.update_batches.append((TelegramUpdate(10, 2002, 2002, "💰 Цены"),))
         self.bot.poll_once()
         self.assertEqual(len(self.service.calls), calls_before)
 

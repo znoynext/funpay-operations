@@ -80,7 +80,7 @@ class FunPayReplyRouter:
             self._replies.mark(attempt.attempt_id, "failed")
             return CommandReply("Ответ не отправлен.", reply_markup=_retry_markup(attempt.attempt_id))
         self._replies.mark(attempt.attempt_id, "sent")
-        return CommandReply("Ответ покупателю отправлен.")
+        return CommandReply(f"✅ Отправлено {attempt.target.buyer_nickname}")
 
 
 def _retry_markup(attempt_id: int) -> dict[str, object]:

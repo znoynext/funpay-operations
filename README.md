@@ -215,12 +215,19 @@ task. Application logs use the existing rotating local handler.
 
 ## Telegram control layer
 
-`TelegramControlRouter` is ready for the future primary Telegram interface but
-is tested only with `MockTelegramApi` and `MockControlService`. Its main menu
-contains Status, Mythic+, Delves, Messages, price check/update, update+raise,
-trusted sellers, lots, rollback, pause/resume, and Emergency stop. Mass lot
-sync, mass price update, rollback, update+raise, and lot disabling require an
-inline confirm/cancel callback before reaching the service layer.
+`TelegramControlRouter` is a compact, button-first dashboard tested only with
+`MockTelegramApi` and `MockControlService`. It presents Mythic+, Delves,
+prices, messages, sellers, lots, update+raise, and settings without exposing
+internal service codes or FunPay IDs in normal screens. Inline navigation uses
+Back and Home, and callback navigation edits the same Telegram message instead
+of posting a new one where this is safe. Technical lot details are available
+only under **Подробнее**.
+
+Price updates, rollback, update+raise, lot sync, seller add/remove, and emergency
+resume use a preview/confirmation/result flow. Price checks remain read-only
+and do not request confirmation. Buttons carry only short opaque local tokens,
+are bound to the allowlisted user and current screen, and stale buttons offer a
+safe refresh rather than performing an action.
 
 Emergency stop is persisted locally and blocks lot writes, price writes, raise,
 auto-reply, automated outbound messages, and Telegram-to-FunPay replies. It
@@ -306,14 +313,12 @@ transaction data in source files, YAML, or commits.
 ## Telegram control bot
 
 The bot uses the official Telegram Bot API with long polling only; webhooks are
-not configured. First store the token locally with `funpay-setup set
-telegram_bot_token`, add your numeric Telegram user ID to the ignored
-`config.yaml`, then set `telegram.enabled: true`. The bot accepts commands only
-from an allowlisted **private** chat; rejected commands are recorded in the
-local security log without message text or token values. `/start`, `/status`,
-`/pause`, `/resume`, and `/stop` are available now, including a button menu.
-The remaining menu commands reply that their corresponding FunPay module is not
-yet available. The token is never read by CI or stored in Git.
+not configured. After future local setup, `/start` or `/status` opens the
+dashboard; normal use is button-first and does not require remembering commands,
+IDs, or service codes. The bot accepts controls only from an allowlisted
+**private** chat; rejected requests are recorded in the local security log
+without message text or token values. The token is never read by CI or stored in
+Git.
 
 ## New FunPay-message notifications
 

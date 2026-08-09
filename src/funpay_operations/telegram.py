@@ -47,12 +47,16 @@ class CommandReply:
     show_menu: bool = False
     stop_polling: bool = False
     reply_markup: Mapping[str, Any] | None = None
+    edit_message: bool = False
 
 
 class TelegramBotApi(Protocol):
     def get_updates(self, offset: int | None, timeout_seconds: int) -> tuple[TelegramUpdate, ...]: ...
 
     def send_message(self, chat_id: int, text: str, *, reply_markup: Mapping[str, Any] | None = None) -> int: ...
+
+    def edit_message(self, chat_id: int, message_id: int, text: str, *,
+                     reply_markup: Mapping[str, Any] | None = None) -> None: ...
 
 
 class TaskStateStore(Protocol):
@@ -115,6 +119,15 @@ class TelegramHttpApi:
         if not isinstance(result, dict) or not _is_int(result.get("message_id")):
             raise TelegramProtocolError("Telegram sendMessage result has no message identifier")
         return int(result["message_id"])
+
+    def edit_message(self, chat_id: int, message_id: int, text: str, *,
+                     reply_markup: Mapping[str, Any] | None = None) -> None:
+        if message_id <= 0 or not text or len(text) > 4096:
+            raise ValueError("Telegram edited message must have a valid identifier and text")
+        payload: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "text": text}
+        if reply_markup is not None:
+            payload["reply_markup"] = dict(reply_markup)
+        self._call("editMessageText", payload, timeout_seconds=self._timeout_seconds)
 
     def _call(self, method: str, payload: Mapping[str, Any], *, timeout_seconds: int) -> Any:
         token = self._token_provider()
@@ -234,12 +247,11 @@ class TelegramLongPollingBot:
                 reply = self._handler.handle(update)
             if reply is not None:
                 try:
-                    self._api.send_message(
-                        update.chat_id, reply.text,
-                        reply_markup=reply.reply_markup if reply.reply_markup is not None else (
-                            MAIN_MENU if reply.show_menu else None
-                        ),
-                    )
+                    markup = reply.reply_markup if reply.reply_markup is not None else (MAIN_MENU if reply.show_menu else None)
+                    if reply.edit_message and update.callback_data and update.reply_to_message_id is not None:
+                        self._api.edit_message(update.chat_id, update.reply_to_message_id, reply.text, reply_markup=markup)
+                    else:
+                        self._api.send_message(update.chat_id, reply.text, reply_markup=markup)
                 except TelegramError:
                     self._logger.warning("Telegram reply could not be sent; update will be retried")
                     return
@@ -274,6 +286,7 @@ class MockTelegramApi:
 
     update_batches: list[tuple[TelegramUpdate, ...]] = field(default_factory=list)
     sent_messages: list[tuple[int, str, Mapping[str, Any] | None]] = field(default_factory=list)
+    edited_messages: list[tuple[int, int, str, Mapping[str, Any] | None]] = field(default_factory=list)
     requested_offsets: list[int | None] = field(default_factory=list)
     next_message_id: int = 1
 
@@ -287,12 +300,18 @@ class MockTelegramApi:
         self.next_message_id += 1
         return message_id
 
+    def edit_message(self, chat_id: int, message_id: int, text: str, *,
+                     reply_markup: Mapping[str, Any] | None = None) -> None:
+        self.edited_messages.append((chat_id, message_id, text, reply_markup))
+
 
 def build_telegram_bot(settings: Any, local_secret_store: Any, states: TaskStateStore,
                        logger: logging.Logger) -> TelegramLongPollingBot:
     """Compose the bot without reading the DPAPI token until polling starts."""
 
-    token_provider = lambda: local_secret_store.get(settings.telegram_token_key)
+    def token_provider() -> str | None:
+        return local_secret_store.get(settings.telegram_token_key)
+
     api = TelegramHttpApi(token_provider, timeout_seconds=settings.telegram_long_poll_timeout_seconds + 10)
     handler = TelegramCommandHandler(
         settings.allowed_telegram_user_ids, states, logger,
@@ -327,8 +346,8 @@ def _parse_message(update_id: int, message: Mapping[str, Any], *, sender: Any | 
     chat = message.get("chat")
     if not isinstance(sender, dict) or not isinstance(chat, dict):
         return None
-    user_id, chat_id = sender.get("id"), chat.get("id")
-    if not _is_int(user_id) or not _is_int(chat_id):
+    user_id, chat_id, message_id = sender.get("id"), chat.get("id"), message.get("message_id")
+    if not _is_int(user_id) or not _is_int(chat_id) or not _is_int(message_id) or message_id <= 0:
         return None
     reply_to = message.get("reply_to_message")
     reply_to_message_id = reply_to.get("message_id") if isinstance(reply_to, dict) else None

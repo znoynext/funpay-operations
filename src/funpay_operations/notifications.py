@@ -80,14 +80,14 @@ class FunPayMessageNotifier:
 
 def _notification_text(message: FunPayMessage) -> str:
     buyer = (message.buyer_nickname or "Неизвестный покупатель")[:256]
-    related = f"\nЛот/заказ: {message.related_item[:512]}" if message.related_item else ""
+    related = message.related_item[:512] if message.related_item else "FunPay сообщение"
     # Bot API has a 4096-character message limit. The original remains in local SQLite.
     body = message.body[:3000]
-    return f"Новое сообщение\nПокупатель: {buyer}{related}\n\n{body}"[:4096]
+    return f"💬 {buyer}\n{related}\n\n{body}"[:4096]
 
 
 def _notification_markup(dialog_id: int, dialog_url: str | None) -> Mapping[str, object]:
-    open_button: dict[str, str] = {"text": "Открыть диалог"}
+    open_button: dict[str, str] = {"text": "Открыть FunPay"}
     if _is_safe_funpay_url(dialog_url):
         open_button["url"] = dialog_url or ""
     else:
