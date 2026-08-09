@@ -35,6 +35,7 @@ bin/
 obj/
 dist/
 build/
+*.spec
 coverage/
 node_modules/
 

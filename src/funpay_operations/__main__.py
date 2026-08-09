@@ -24,11 +24,12 @@ from .seasonal import DescriptionGenerator, SeasonalDataError, load_seasonal_dat
 from .services import DelveService, MythicPlusService, Region, ServiceFormat
 from .setup_wizard import SecretStore
 from .smoke import run_smoke_test
+from .windows_infra import (autostart_status, diagnostics, first_run, install_autostart, remove_autostart, resolve_windows_paths)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the FunPay operations background scaffold.")
-    parser.add_argument("command", nargs="?", choices=["smoke-test", "discover-lots", "catalog", "lots", "prices"], help="run a local command")
+    parser.add_argument("command", nargs="?", choices=["smoke-test", "discover-lots", "catalog", "lots", "prices", "diagnostics", "first-run", "install-autostart", "remove-autostart", "show-autostart-status", "repair-autostart"], help="run a local command")
     parser.add_argument("catalog_action", nargs="?", choices=["preview", "validate", "init-example", "plan-sync", "check", "dry-run-update", "rollback-preview"])
     parser.add_argument("--config", type=Path, help="YAML configuration path (takes priority over .env)")
     parser.add_argument("--env-file", type=Path, default=Path(".env"), help="dotenv configuration path")
@@ -64,6 +65,19 @@ def main() -> int:
         help="local ignored SQLite path for mock transaction snapshots",
     )
     args = parser.parse_args()
+
+    if args.command in {"diagnostics", "first-run", "install-autostart", "remove-autostart", "show-autostart-status", "repair-autostart"}:
+        paths = resolve_windows_paths()
+        if args.command == "diagnostics":
+            for name, value in diagnostics(paths).items(): print(f"{name}: {value}")
+            return 0
+        if args.command == "first-run":
+            for name, value in first_run(paths).items(): print(f"{name}: {value}")
+            return 0
+        if args.command == "show-autostart-status": print(f"autostart: {autostart_status()}"); return 0
+        executable = Path(sys.executable)
+        if args.command in {"install-autostart", "repair-autostart"}: install_autostart(executable); return 0
+        remove_autostart(); return 0
 
     if args.preview_seasonal_data:
         try:
