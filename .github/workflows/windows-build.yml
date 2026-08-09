@@ -20,6 +20,10 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
+      - name: Set up .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.0.0
+        with:
+          dotnet-version: "8.0.422"
       - name: Build generic executables
         shell: powershell
         run: .\scripts\build_windows.ps1
@@ -33,13 +37,15 @@ jobs:
           .\dist\funpay-operations-cli.exe --background --once
           .\dist\funpay-operations-cli.exe setup --non-interactive
           $app = Join-Path $env:LOCALAPPDATA 'FunPay Operations\app'
-          'funpay-operations.exe', 'funpay-operations-cli.exe', 'funpay-operations-setup.exe' | ForEach-Object {
+          'funpay-operations.exe', 'funpay-operations-cli.exe', 'funpay-operations-setup.exe', 'funpay-operations-auth.exe', 'THIRD_PARTY_NOTICES.md' | ForEach-Object {
             $path = Join-Path $app $_
             if (-not (Test-Path -LiteralPath $path) -or (Get-Item -LiteralPath $path).Length -le 0) { throw "Missing installed binary: $_" }
           }
           & (Join-Path $app 'funpay-operations-cli.exe') diagnostics
           & (Join-Path $app 'funpay-operations.exe') --background --once
           & (Join-Path $app 'funpay-operations-setup.exe') --smoke
+          & (Join-Path $app 'funpay-operations-auth.exe') --runtime-status
+          if ($LASTEXITCODE -notin @(0, 2)) { throw "WebView2 helper status check failed: $LASTEXITCODE" }
           & (Join-Path $app 'funpay-operations-cli.exe') uninstall
       - name: Upload generic executables only
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -49,3 +55,5 @@ jobs:
             dist/funpay-operations.exe
             dist/funpay-operations-cli.exe
             dist/funpay-operations-setup.exe
+            dist/funpay-operations-auth.exe
+            dist/THIRD_PARTY_NOTICES.md

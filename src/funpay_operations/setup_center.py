@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 import webbrowser
 
 from .setup_services import FunPaySetupService, SetupOutcome, TelegramOwnerCandidate, TelegramSetupService
+from .runtime import DuplicateProcessError, SingletonProcessLock
+from .webview_auth import WebView2AuthLauncher
 from .windows_infra import (
     WindowsPaths,
     WindowsSetupError,
@@ -23,6 +26,9 @@ from .windows_infra import (
     setup_value,
     verify_autostart_target,
 )
+
+
+WEBVIEW2_RUNTIME_INFO_URL = "https://developer.microsoft.com/microsoft-edge/webview2/"
 
 
 @dataclass(frozen=True)
@@ -40,11 +46,13 @@ class SetupCenterController:
         *,
         funpay: FunPaySetupService | None = None,
         telegram: TelegramSetupService | None = None,
+        auth: WebView2AuthLauncher | None = None,
         restart: Callable[[WindowsPaths], Path] = restart_background,
     ) -> None:
         self.paths = paths
         self.funpay = funpay or FunPaySetupService(paths)
         self.telegram = telegram or TelegramSetupService(paths)
+        self.auth = auth or WebView2AuthLauncher(paths)
         self._restart = restart
 
     def statuses(self) -> tuple[SetupStatus, ...]:
@@ -73,6 +81,7 @@ class SetupCenterController:
             SetupStatus("Владелец", owner),
             SetupStatus("Автозапуск", autostart),
             SetupStatus("База данных", database),
+            SetupStatus("WebView2", "🟢 Доступен" if report.get("webview2_runtime") == "available" else "⚪ Требуется Runtime"),
             SetupStatus("Automation", automation),
             SetupStatus("Background", "🟢 Работает" if background_runtime_status(self.paths) == "running" else "⚪ Остановлен"),
             SetupStatus("Setup Center", setup_state),
@@ -83,6 +92,23 @@ class SetupCenterController:
 
     def connect_funpay(self, golden_key: str, golden_seal: str) -> SetupOutcome:
         return self.funpay.verify_and_save(golden_key, golden_seal)
+
+    def authorize_funpay(self) -> SetupOutcome:
+        """Run one local auth window at a time; no credential leaves this PC."""
+
+        try:
+            with SingletonProcessLock(self.paths.data / "funpay-auth-window.lock"):
+                result = self.funpay.authorize_with_webview(self.auth)
+                if result.ok:
+                    self.telegram.notify_funpay_authorized()
+                return result
+        except DuplicateProcessError:
+            return SetupOutcome(False, "Окно авторизации FunPay уже открыто.")
+        except OSError:
+            return SetupOutcome(False, "Не удалось подготовить локальное окно авторизации FunPay.")
+
+    def verify_funpay(self) -> SetupOutcome:
+        return self.funpay.verify_existing()
 
     def connect_telegram(self, token: str) -> SetupOutcome:
         return self.telegram.verify_and_save(token)
@@ -168,15 +194,79 @@ class SetupCenterWindow:
 
         (messagebox.showerror if error else messagebox.showinfo)(title, text, parent=self.root)
 
-    def _open_funpay(self) -> None:
+    def _open_funpay(self, *, start_login: bool = False) -> None:
         window = self.tk.Toplevel(self.root)
         window.title("Подключение FunPay")
         frame = self.ttk.Frame(window, padding=16)
         frame.grid(sticky="nsew")
         self.ttk.Label(frame, text="🔐 Подключение FunPay", font=("Segoe UI", 14, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
-        self.ttk.Label(frame, text=("Бот использует существующую сессию FunPay.\n"
-                                    "Браузер можно закрыть после подключения.\n\n"
-                                    "Введите два значения cookie с funpay.com.")).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 10))
+        report = diagnostics(self.controller.paths)
+        state = report.get("funpay", "not_configured")
+        connected = state == "configured"
+        expired = state == "expired"
+        runtime_available = report.get("webview2_runtime") == "available"
+        heading = "🟢 FunPay подключён" if connected else "🔴 Требуется вход" if expired else "⚪ Не авторизован"
+        self.ttk.Label(frame, text=heading).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 5))
+        self.ttk.Label(frame, text=("Откроется защищённое встроенное окно FunPay.\n"
+                                    "Войдите обычным способом; браузер отдельно открывать не нужно.\n"
+                                    "Данные сессии хранятся локально и зашифрованы Windows.")).grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 10))
+
+        if connected:
+            self.ttk.Button(frame, text="Проверить", command=lambda: self._verify_funpay(window)).grid(row=3, column=0, sticky="ew", pady=(6, 0))
+            self.ttk.Button(frame, text="Войти заново", command=lambda: self._confirm_reauthorize(window)).grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=(6, 0))
+        else:
+            self.ttk.Button(frame, text="🔐 Войти в FunPay", command=lambda: self._begin_funpay_authorization(window)).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        advanced_row = 4
+        if not runtime_available:
+            self.ttk.Label(frame, text="Для входа требуется Microsoft Edge WebView2 Runtime.").grid(row=4, column=0, columnspan=2, sticky="w", pady=(10, 0))
+            self.ttk.Button(frame, text="Как установить WebView2 Runtime", command=self._open_webview2_runtime_info).grid(row=5, column=0, columnspan=2, sticky="ew", pady=(5, 0))
+            advanced_row = 6
+        self.ttk.Button(frame, text="Расширенные настройки", command=lambda: self._open_manual_funpay(window)).grid(row=advanced_row, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self.ttk.Button(frame, text="Отмена", command=window.destroy).grid(row=advanced_row + 1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        if start_login and not connected:
+            window.after(0, lambda: self._begin_funpay_authorization(window))
+
+    def _verify_funpay(self, window: object) -> None:
+        self._run_funpay_operation(window, self.controller.verify_funpay)
+
+    def _confirm_reauthorize(self, window: object) -> None:
+        from tkinter import messagebox
+
+        if messagebox.askyesno("FunPay", "Заменить текущую сессию новой?", parent=window):
+            self._begin_funpay_authorization(window)
+
+    def _begin_funpay_authorization(self, window: object) -> None:
+        self._run_funpay_operation(window, self.controller.authorize_funpay)
+
+    def _run_funpay_operation(self, window: object, operation: Callable[[], SetupOutcome]) -> None:
+        status = self.tk.Toplevel(window)
+        status.title("FunPay")
+        self.ttk.Label(status, text="Ожидаем вход в FunPay…", padding=18).grid(sticky="nsew")
+        status.transient(window)
+        status.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        def worker() -> None:
+            result = operation()
+            self.root.after(0, lambda: finish(result))
+
+        def finish(result: SetupOutcome) -> None:
+            status.destroy()
+            self._message("FunPay", result.message, error=not result.ok)
+            self.refresh()
+            if result.ok:
+                window.destroy()
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _open_manual_funpay(self, parent: object) -> None:
+        """Emergency-only fallback; never part of the normal setup path."""
+
+        window = self.tk.Toplevel(parent)
+        window.title("Расширенные настройки FunPay")
+        frame = self.ttk.Frame(window, padding=16)
+        frame.grid(sticky="nsew")
+        self.ttk.Label(frame, text="Ручной ввод сессии", font=("Segoe UI", 14, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
+        self.ttk.Label(frame, text="Используйте только для аварийного восстановления. Обычный вход выполняется кнопкой «Войти в FunPay».").grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 10))
         key, seal = self.tk.StringVar(), self.tk.StringVar()
         self._secret_row(frame, 2, "golden_key:", key)
         self._secret_row(frame, 3, "golden_seal:", seal)
@@ -188,13 +278,10 @@ class SetupCenterWindow:
             self._message("FunPay", result.message, error=not result.ok)
             if result.ok:
                 window.destroy()
+                parent.destroy()
                 self.refresh()
 
-        self.ttk.Button(frame, text="Проверить и сохранить", command=submit).grid(row=4, column=0, sticky="ew", pady=(10, 0))
-        self.ttk.Button(frame, text="Как найти ключи?", command=lambda: self._message(
-            "Как найти ключи?", "1. Войдите в FunPay в обычном браузере.\n2. Нажмите F12 → Application → Cookies → https://funpay.com.\n3. Скопируйте Value golden_key и golden_seal."
-        )).grid(row=4, column=1, sticky="ew", padx=(8, 0), pady=(10, 0))
-        self.ttk.Button(frame, text="Отмена", command=window.destroy).grid(row=5, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self.ttk.Button(frame, text="Проверить и сохранить", command=submit).grid(row=4, column=0, columnspan=2, sticky="ew", pady=(10, 0))
 
     def _secret_row(self, frame: object, row: int, label: str, variable: object) -> None:
         self.ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=3)
@@ -319,10 +406,16 @@ class SetupCenterWindow:
             return
         webbrowser.open_new_tab(f"https://t.me/{username}")
 
+    def _open_webview2_runtime_info(self) -> None:
+        """Open only Microsoft's official WebView2 Runtime information page."""
+
+        webbrowser.open_new_tab(WEBVIEW2_RUNTIME_INFO_URL)
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Open the local FunPay Operations Setup Center.")
     parser.add_argument("--smoke", action="store_true", help="load the safe GUI model without showing a window")
+    parser.add_argument("--funpay-auth", action="store_true", help="open only the local user-driven FunPay authorization flow")
     args = parser.parse_args(argv)
     from .windows_infra import resolve_windows_paths
 
@@ -333,7 +426,9 @@ def main(argv: list[str] | None = None) -> int:
     import tkinter as tk
 
     root = tk.Tk()
-    SetupCenterWindow(root, controller)
+    window = SetupCenterWindow(root, controller)
+    if args.funpay_auth:
+        root.after(0, lambda: window._open_funpay(start_login=True))
     root.mainloop()
     return 0
 

@@ -14,6 +14,7 @@ from .funpay import FunPayError, NativeFunPayClient
 from .repositories import TaskStateRepository
 from .setup_wizard import SecretStore, SecretStoreError
 from .telegram import TelegramBotProfile, TelegramError, TelegramHttpApi, TelegramUpdate
+from .webview_auth import WebView2AuthLauncher, WebView2RuntimeUnavailable, WebViewAuthCancelled, WebViewAuthError
 from .windows_infra import (
     WindowsPaths,
     delete_setup_value,
@@ -53,6 +54,8 @@ class TelegramSetupApi(Protocol):
     def get_me(self) -> TelegramBotProfile: ...
 
     def get_updates(self, offset: int | None, timeout_seconds: int) -> tuple[TelegramUpdate, ...]: ...
+
+    def send_message(self, chat_id: int, text: str, *, reply_markup: object | None = None) -> int: ...
 
 
 def redact_setup_text(value: str, sensitive_values: tuple[str, ...] = ()) -> str:
@@ -100,14 +103,14 @@ class FunPaySetupService:
 
     def verify_and_save(self, golden_key: str, golden_seal: str) -> SetupOutcome:
         if not golden_key or not golden_seal or any("\r" in value or "\n" in value for value in (golden_key, golden_seal)):
-            return SetupOutcome(False, "Проверьте актуальность golden_key и golden_seal.")
+            return SetupOutcome(False, "Не удалось проверить авторизацию FunPay.")
         proposed = json.dumps({"golden_key": golden_key, "golden_seal": golden_seal})
         sensitive = (golden_key, golden_seal, proposed)
         try:
             candidate = self._client_factory(proposed)
             try:
                 if not candidate.check_authorization():
-                    return SetupOutcome(False, "Не удалось авторизоваться в FunPay. Проверьте ключи.")
+                    return SetupOutcome(False, "Не удалось подтвердить авторизацию FunPay.")
                 profile = candidate.get_profile()
             finally:
                 candidate.close()
@@ -127,10 +130,59 @@ class FunPaySetupService:
             Database(self.paths.database).initialize()
             TaskStateRepository(Database(self.paths.database)).save("funpay_session", "authorized")
             username = getattr(profile, "username", None)
-            return SetupOutcome(True, "Авторизация успешна.", username=username if isinstance(username, str) else None)
+            return SetupOutcome(True, "FunPay подключён.", username=username if isinstance(username, str) else None)
         except (FunPayError, SecretStoreError, OSError, ValueError, sqlite3.Error) as error:
             write_redacted_setup_failure(self.paths, error, sensitive)
-            return SetupOutcome(False, "Не удалось авторизоваться. Проверьте актуальность ключей.")
+            return SetupOutcome(False, "Не удалось проверить авторизацию FunPay.")
+
+    def authorize_with_webview(self, launcher: WebView2AuthLauncher) -> SetupOutcome:
+        """Use the local helper, then retain only a read-only verified session."""
+
+        try:
+            candidate = launcher.acquire()
+        except WebView2RuntimeUnavailable:
+            return SetupOutcome(False, "Для входа в FunPay требуется Microsoft Edge WebView2 Runtime.")
+        except WebViewAuthCancelled:
+            return SetupOutcome(False, "Вход в FunPay отменён.")
+        except WebViewAuthError as error:
+            write_redacted_setup_failure(self.paths, error, ())
+            return SetupOutcome(False, "Не удалось открыть окно авторизации FunPay.")
+        try:
+            return self.verify_and_save(candidate.golden_key, candidate.golden_seal)
+        finally:
+            launcher.cleanup(candidate.profile)
+
+    def verify_existing(self) -> SetupOutcome:
+        """Read a DPAPI session once without exposing it to the UI."""
+
+        session: str | None = None
+        try:
+            session = self._store_factory(self.paths.secrets).get("funpay_session")
+            if not session:
+                return SetupOutcome(False, "FunPay пока не настроен.")
+            client = self._client_factory(session)
+            try:
+                if not client.check_authorization():
+                    self._mark_expired()
+                    return SetupOutcome(False, "Сессия FunPay больше не действует. Войдите снова.")
+                profile = client.get_profile()
+            finally:
+                client.close()
+            Database(self.paths.database).initialize()
+            TaskStateRepository(Database(self.paths.database)).save("funpay_session", "authorized")
+            username = getattr(profile, "username", None)
+            return SetupOutcome(True, "FunPay подключён.", username=username if isinstance(username, str) else None)
+        except (FunPayError, SecretStoreError, OSError, ValueError, sqlite3.Error) as error:
+            self._mark_expired()
+            write_redacted_setup_failure(self.paths, error, (session or "",))
+            return SetupOutcome(False, "Сессия FunPay требует повторного входа.")
+
+    def _mark_expired(self) -> None:
+        try:
+            Database(self.paths.database).initialize()
+            TaskStateRepository(Database(self.paths.database)).save("funpay_session", "expired", last_error="session_expired")
+        except sqlite3.Error:
+            pass
 
 
 class TelegramSetupService:
@@ -210,4 +262,21 @@ class TelegramSetupService:
         try:
             delete_setup_value(self.paths, "telegram_owner_candidate")
         except (sqlite3.Error, OSError, ValueError):
+            return
+
+    def notify_funpay_authorized(self) -> None:
+        """Best-effort success notice for the explicitly confirmed local owner."""
+
+        try:
+            owner = setup_value(self.paths, "telegram_owner")
+            user_id = owner.get("user_id") if isinstance(owner, dict) else None
+            if not isinstance(user_id, int) or user_id <= 0:
+                return
+            store = self._store_factory(self.paths.secrets)
+            api = self._api_factory(lambda: store.get("telegram_bot_token"))
+            api.send_message(
+                user_id,
+                "✅ FunPay снова подключён\n\nСессия проверена.\nАвтоматические изменения всё ещё выключены до отдельного разрешения.",
+            )
+        except (TelegramError, SecretStoreError, OSError, ValueError, sqlite3.Error):
             return

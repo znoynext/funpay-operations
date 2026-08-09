@@ -236,12 +236,14 @@ remain mandatory for every control action.
 
 ## Windows standalone installation
 
-Generic builds use PyInstaller and produce three binaries: background
+Generic builds use PyInstaller plus a small internal .NET helper and produce four binaries: background
 `dist/funpay-operations.exe` (no console), technical
 `dist/funpay-operations-cli.exe`, and the normal local GUI
-`dist/funpay-operations-setup.exe` (no console). None contains user
+`dist/funpay-operations-setup.exe` (no console), and
+`dist/funpay-operations-auth.exe` for the fixed FunPay login window.
+`THIRD_PARTY_NOTICES.md` accompanies the helper. None contains user
 configuration, DPAPI secrets, databases, logs, or customer data. CI builds all
-three on `windows-latest`, installs them into a temporary per-user directory,
+four on `windows-latest`, installs them into a temporary per-user directory,
 and executes only safe smoke checks.
 
 Per-user files live below `%LOCALAPPDATA%\FunPay Operations`: application,
@@ -254,7 +256,7 @@ For normal Windows use, open **FunPay Operations Setup** from the current
 user's Start Menu. It points to the installed GUI and needs neither Python nor
 PowerShell. The developer/managed install flow
 `scripts/install_local_windows.ps1` builds the current checkout, verifies all
-three outputs, atomically updates `%LOCALAPPDATA%\FunPay Operations\app`,
+four outputs and the required notice, atomically updates `%LOCALAPPDATA%\FunPay Operations\app`,
 creates the folders and SQLite database, applies migrations, repairs the
 per-user autostart task, creates or updates the Start Menu shortcut, and opens
 the Setup Center. It fails rather than reporting an installation if any final
@@ -280,14 +282,39 @@ explicitly preserves the local data and encrypted secrets.
 
 ## Connection setup UX
 
-The Setup Center's **Подключить FunPay** screen uses masked standard text
-fields (including normal paste and selection), explains how to manually find
-the two cookies in the browser, and never attempts to read browser cookies.
-It checks the proposed session through the production read-only adapter before
-saving it, saves only a successful session through Windows DPAPI, reads it back
-through DPAPI, and performs one more read-only authorization check. Neither
-`golden_key` nor `golden_seal` appears in command-line arguments, logs,
-configuration files, SQLite, Telegram, CI, or artifacts.
+The Setup Center's **Войти в FunPay** flow opens a dedicated, user-driven
+Microsoft Edge WebView2 window. It uses its own short-lived profile below
+`%LOCALAPPDATA%\FunPay Operations\data\auth-temp-*`, never reads Chrome or
+Edge profile databases, and allows only HTTPS `funpay.com` navigation. The
+user enters credentials, 2FA, and any CAPTCHA directly in that window; the app
+does not fill forms, inject JavaScript, bypass checks, or control mouse and
+keyboard.
+
+The official Microsoft.Web.WebView2 SDK is pinned to `1.0.4129.50`; its
+redistribution notice is included in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+The helper asks WebView2 CookieManager only for `https://funpay.com/`, selects
+only `golden_key` and `golden_seal`, protects the short-lived hand-off with the
+current user's Windows DPAPI, and closes. The Python service performs the
+production read-only authorization and profile checks before it stores the
+session in the existing DPAPI SecretStore; it then reads it back and checks it
+once more. The temporary profile is deleted after the hand-off and retried on a
+later launch if Windows still has a file lock. Neither cookie appears in
+command-line arguments, logs, configuration files, SQLite, Telegram, CI, or
+artifacts.
+
+Top-level navigation is limited to HTTPS FunPay plus the exact VK OAuth hosts
+(`id.vk.com` and `oauth.vk.com`) needed for FunPay's documented VK sign-in;
+other sites, downloads, pop-ups, external protocols, DevTools, and context
+menus are blocked. CAPTCHA and 2FA stay entirely user-driven.
+
+Manual session entry remains only under **Расширенные настройки** for emergency
+recovery; it is never the normal user path and does not instruct ordinary users
+to use DevTools or F12. Existing sessions can be read-only checked without
+replacement; **Войти заново** asks for confirmation before replacing one.
+
+The auth window requires the official Evergreen Microsoft Edge WebView2 Runtime.
+If it is absent, Setup Center reports the requirement and does not fall back to
+manual cookies or download a runtime from an untrusted source.
 
 The Telegram screen keeps the Bot Token in DPAPI rather than YAML, validates it
 with `getMe`, and displays only the bot username. After the owner presses
@@ -307,10 +334,14 @@ is configured, the user-facing notification is:
 Автоматические изменения остановлены.
 ```
 
-Its **Как восстановить** action contains no cookie and directs the allowlisted
-private user to the local setup flow. Replacing the local DPAPI session marks a
-new reconnect attempt automatically; a successful read clears the blocked
-state without reinstalling the application.
+Its private, allowlisted Telegram actions are **Авторизоваться** and
+**Статус**. The first action starts only the installed local Setup Center with
+the fixed `--funpay-auth` argument; it never transfers login data over Telegram
+and is rate limited. If no interactive Windows desktop is available, Telegram
+reports that the window will be available after Windows sign-in. Replacing the
+local DPAPI session marks a new reconnect attempt automatically; a successful
+read clears the blocked state without reinstalling the application and sends a
+safe confirmation to the confirmed owner when Telegram is configured.
 
 The main Setup Center never displays YAML, JSON, SQLite paths, raw FunPay IDs,
 or a traceback. **Подробнее** information is redacted before it is written to
