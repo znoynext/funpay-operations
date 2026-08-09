@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import os
 from pathlib import Path
 import sys
@@ -13,6 +14,8 @@ from dotenv import load_dotenv
 from .app import Application
 from .config import load_settings
 from .funpay import build_read_client
+from .database import Database
+from .lot_discovery import OwnLotRegistryRepository, run_discovery
 from .seasonal import DescriptionGenerator, SeasonalDataError, load_seasonal_data
 from .services import DelveService, MythicPlusService, Region, ServiceFormat
 from .setup_wizard import SecretStore
@@ -21,7 +24,7 @@ from .smoke import run_smoke_test
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the FunPay operations background scaffold.")
-    parser.add_argument("command", nargs="?", choices=["smoke-test"], help="run a read-only integration smoke test")
+    parser.add_argument("command", nargs="?", choices=["smoke-test", "discover-lots"], help="run a read-only local command")
     parser.add_argument("--config", type=Path, help="YAML configuration path (takes priority over .env)")
     parser.add_argument("--env-file", type=Path, default=Path(".env"), help="dotenv configuration path")
     parser.add_argument("--once", action="store_true", help="Run one safe background cycle and exit")
@@ -31,6 +34,14 @@ def main() -> int:
     parser.add_argument("--preview-region", choices=[region.value for region in Region], default="eu")
     parser.add_argument("--preview-format", choices=[format_.value for format_ in ServiceFormat], default="selfplay")
     parser.add_argument("--preview-bountiful", action="store_true", help="Use Bountiful mode for a Delve preview")
+    parser.add_argument(
+        "--select-mythic-template", action="store_true",
+        help="prompt locally to select an already mapped Mythic+ lot as an exemplar",
+    )
+    parser.add_argument(
+        "--select-delves-template", action="store_true",
+        help="prompt locally to select an already mapped Delves lot as an exemplar",
+    )
     args = parser.parse_args()
 
     if args.preview_seasonal_data:
@@ -55,6 +66,24 @@ def main() -> int:
         settings = load_settings(config_path=config_path, env_path=args.env_file)
         client = build_read_client(settings, SecretStore(settings.data_directory / "secrets.dpapi"))
         return run_smoke_test(client, output=sys.stdout)
+    if args.command == "discover-lots":
+        settings = load_settings(config_path=config_path, env_path=args.env_file)
+        database = Database(settings.database_path)
+        database.initialize()
+        client = build_read_client(settings, SecretStore(settings.data_directory / "secrets.dpapi"))
+        mythic_template_id = None
+        delves_template_id = None
+        try:
+            if args.select_mythic_template:
+                mythic_template_id = getpass.getpass("FunPay Mythic+ lot ID for local template (input hidden): ")
+            if args.select_delves_template:
+                delves_template_id = getpass.getpass("FunPay Delves lot ID for local template (input hidden): ")
+            return run_discovery(
+                client, OwnLotRegistryRepository(database), output=sys.stdout,
+                mythic_template_id=mythic_template_id, delves_template_id=delves_template_id,
+            )
+        finally:
+            client.close()
     application = Application.from_files(config_path, args.env_file)
     asyncio.run(application.run(once=args.once))
     return 0

@@ -22,6 +22,8 @@ Copyright (c) 2026 znoynext. **All Rights Reserved.**
 - A Windows DPAPI setup command for local secret storage. It never writes secrets to Git or `.env`.
 - A native FunPay adapter with normalized profiles, lots, dialogs, and messages,
   backed by the pinned `fpx-engine` library rather than owner-supplied endpoints.
+- A local-only Own Lot Registry which reads owned-lot editor snapshots without
+  performing a FunPay mutation and classifies only unambiguous WoW services.
 - Rotating local logs under the ignored `data/` directory.
 
 The scaffold deliberately contains no browser automation, mouse/keyboard control,
@@ -172,6 +174,47 @@ It verifies the local session format, authorization, profile, own-lot read,
 latest-dialog read, and client closure. Its output contains only success states
 and aggregate lot/dialog counts: no cookies, message text, buyer names, or full
 external IDs.
+
+## Own Lot Registry / discovery
+
+`discover-lots` reads the authenticated seller's existing lots and stores the
+result only in the ignored SQLite database. It uses `fpx-engine`'s read-only
+editor snapshot to retain the category node, current price, public title and
+description, location, explicit activity/deletion state, current non-sensitive
+form fields, and the declared non-sensitive options for that category node.
+This is discovery only: it does not create, edit,
+enable, disable, reprice, or raise a lot.
+
+```powershell
+funpay-operations discover-lots --config config.yaml
+```
+
+The command prints just aggregate counts (`own_lots`, `mythic_plus`, `delves`,
+and `unmapped`) and whether exemplars are selected; it never prints a title,
+description, full lot ID, account ID, cookies, or form contents. The local
+registry explicitly excludes CSRF values, auto-delivery secrets, and payment
+messages even though those can occur in an editor form.
+
+Mythic+ and Delves classification relies on explicit, unique markers in the
+lot's own title/description. Mythic+ requires a key level, region,
+self-play/pilot format, and `xN` package size to become mapped. Delves requires
+an explicit tier, Normal/Bountiful state, region, format, and package size.
+Anything unknown, mixed, incomplete, or contradictory remains `unmapped`; no
+field is inferred from a price or an ambiguous phrase. The unstructured public
+description/short-description remains available only in local SQLite as the
+source for later human review of conditions.
+
+To save one already mapped lot as a local exemplar, run discovery with a prompt
+for the relevant existing ID; typed IDs are hidden and are not placed in shell
+history:
+
+```powershell
+funpay-operations discover-lots --config config.yaml --select-mythic-template
+funpay-operations discover-lots --config config.yaml --select-delves-template
+```
+
+An exemplar is only a local pointer to an existing, mapped lot. It makes no
+request that changes FunPay and no edit feature is enabled by selecting it.
 
 Migrations run automatically at startup. They are idempotent, applied inside a
 transaction, and preserve the initial scaffold tables for compatibility. A

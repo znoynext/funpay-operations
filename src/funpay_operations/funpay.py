@@ -61,6 +61,32 @@ class FunPayLot:
 
 
 @dataclass(frozen=True)
+class FunPayLotDetails:
+    """Read-only editor snapshot for one of the authenticated seller's lots.
+
+    ``fpx-engine`` exposes a dynamic form, not a stable typed lot schema.  The
+    adapter preserves its non-sensitive field names and values so a later,
+    separately approved edit feature can discover the exact shape again.
+    CSRF, auto-delivery secrets, and payment messages are deliberately omitted.
+    """
+
+    lot_id: str
+    title: str
+    price_minor: int
+    currency: str
+    seller_id: str
+    category_node_id: str | None
+    is_active: bool | None
+    description: str | None
+    short_description: str | None
+    location: str | None
+    is_deleted: bool | None
+    editor_fields: Mapping[str, str]
+    editor_options: Mapping[str, tuple[tuple[str, str], ...]]
+    omitted_field_names: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class FunPayBumpMetadata:
     """Read-only category data needed by a future, separately approved bump step."""
 
@@ -96,6 +122,8 @@ class FunPayClient(Protocol):
     def get_profile(self) -> FunPayProfile: ...
 
     def get_own_lots(self) -> tuple[FunPayLot, ...]: ...
+
+    def get_own_lot_details(self) -> tuple[FunPayLotDetails, ...]: ...
 
     def get_seller_lots(self, seller_id: str) -> tuple[FunPayLot, ...]: ...
 
@@ -187,6 +215,48 @@ class NativeFunPayClient:
             seller_id = _required_text(getattr(user_data, "user_id", None), "profile.account_id")
             profile = await tools.account.profile.profile(seller_id)
             return await self._normalize_lots(tools, profile, seller_id)
+
+        return self._run(action)
+
+    def get_own_lot_details(self) -> tuple[FunPayLotDetails, ...]:
+        """Read each owned lot's public page and its fpx editor snapshot.
+
+        The fpx method is intentionally the library's read-only parser.  This
+        adapter never calls any of fpx's editor mutation methods.
+        """
+
+        async def action(tools: Any) -> tuple[FunPayLotDetails, ...]:
+            user_data = await tools.account.profile.get_user_data()
+            seller_id = _required_text(getattr(user_data, "user_id", None), "profile.account_id")
+            profile = await tools.account.profile.profile(seller_id)
+            result: list[FunPayLotDetails] = []
+            node_options: dict[str, dict[str, tuple[tuple[str, str], ...]]] = {}
+            for lot in getattr(profile, "lots", ()):
+                lot_id = _required_text(getattr(lot, "id", None), "lot.id")
+                lot_info = await tools.account.lot.get_lot_info(lot_id)
+                editor = await tools.account.lot._get_lot_editor_details(lot_id)
+                fields, omitted = _safe_editor_fields(getattr(editor, "fields", None))
+                category_node_id = _optional_text(getattr(editor, "node_id", None))
+                if category_node_id is not None and category_node_id not in node_options:
+                    node_editor = await tools.account.lot.get_node_editor_data(category_node_id)
+                    node_options[category_node_id] = _safe_node_options(getattr(node_editor, "fields", None))
+                result.append(FunPayLotDetails(
+                    lot_id=lot_id,
+                    title=_required_text(getattr(lot, "name", None), "lot.title"),
+                    price_minor=_price_minor(getattr(lot_info, "price", None)),
+                    currency=self._currency,
+                    seller_id=seller_id,
+                    category_node_id=category_node_id,
+                    is_active=_active_from_editor(editor, fields),
+                    description=_optional_text(getattr(lot_info, "description", None)),
+                    short_description=_optional_text(getattr(lot_info, "short_desc", None)),
+                    location=_optional_text(getattr(editor, "location", None)),
+                    is_deleted=_optional_boolean(getattr(editor, "deleted", None)),
+                    editor_fields=fields,
+                    editor_options=node_options.get(category_node_id, {}),
+                    omitted_field_names=omitted,
+                ))
+            return tuple(result)
 
         return self._run(action)
 
@@ -335,6 +405,7 @@ class MockFunPayClient:
     authorized: bool = True
     profile: FunPayProfile = field(default_factory=lambda: FunPayProfile("mock", "mock", True))
     own_lots: tuple[FunPayLot, ...] = ()
+    own_lot_details: tuple[FunPayLotDetails, ...] = ()
     seller_lots: Mapping[str, tuple[FunPayLot, ...]] = field(default_factory=dict)
     dialogs: tuple[FunPayDialog, ...] = ()
     messages: tuple[FunPayMessage, ...] = ()
@@ -352,6 +423,10 @@ class MockFunPayClient:
     def get_own_lots(self) -> tuple[FunPayLot, ...]:
         self.calls.append("get_own_lots")
         return self.own_lots
+
+    def get_own_lot_details(self) -> tuple[FunPayLotDetails, ...]:
+        self.calls.append("get_own_lot_details")
+        return self.own_lot_details
 
     def get_seller_lots(self, seller_id: str) -> tuple[FunPayLot, ...]:
         self.calls.append("get_seller_lots")
@@ -537,6 +612,84 @@ def _optional_text(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
     return value.strip() or None
+
+
+def _optional_boolean(value: Any) -> bool | None:
+    """Normalize only explicit common HTML form booleans; otherwise unknown."""
+
+    if value is True or value == 1 or value in ("1", "on", "true", "True"):
+        return True
+    if value is False or value == 0 or value in ("0", "off", "false", "False"):
+        return False
+    return None
+
+
+def _active_from_editor(editor: Any, fields: Mapping[str, str]) -> bool | None:
+    """Expose activity only when the parsed form supplies an explicit value."""
+
+    for name in ("active", "is_active", "fields[active]"):
+        if name in fields:
+            return _optional_boolean(fields[name])
+    # ``deleted`` is a distinct editor state, not evidence that a lot is merely
+    # disabled, so it intentionally does not become a guessed activity value.
+    return None
+
+
+def _safe_editor_fields(value: Any) -> tuple[dict[str, str], tuple[str, ...]]:
+    """Keep editable-form data locally while excluding secret-bearing fields."""
+
+    if not isinstance(value, Mapping):
+        raise FunPayProtocolError("lot editor fields must be a mapping")
+    fields: dict[str, str] = {}
+    omitted: list[str] = []
+    for raw_name, raw_field_value in value.items():
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            raise FunPayProtocolError("lot editor field name must be text")
+        name = raw_name.strip()
+        lowered = name.lower()
+        if _is_sensitive_field_name(lowered):
+            omitted.append(name)
+            continue
+        if isinstance(raw_field_value, (str, int, float)) and not isinstance(raw_field_value, bool):
+            fields[name] = str(raw_field_value)
+            continue
+        if isinstance(raw_field_value, bool):
+            fields[name] = "1" if raw_field_value else "0"
+            continue
+        if raw_field_value is None:
+            fields[name] = ""
+            continue
+        raise FunPayProtocolError("lot editor field value must be scalar")
+    return fields, tuple(sorted(omitted))
+
+
+def _safe_node_options(value: Any) -> dict[str, tuple[tuple[str, str], ...]]:
+    """Normalize only non-sensitive declared options from an fpx node editor."""
+
+    if not isinstance(value, (list, tuple)):
+        raise FunPayProtocolError("lot node editor fields must be a sequence")
+    result: dict[str, tuple[tuple[str, str], ...]] = {}
+    for field in value:
+        name = _required_text(getattr(field, "key", None), "lot node editor field name")
+        if _is_sensitive_field_name(name.lower()):
+            continue
+        raw_options = getattr(field, "options", None)
+        if raw_options is None:
+            result[name] = ()
+            continue
+        if not isinstance(raw_options, (list, tuple)):
+            raise FunPayProtocolError("lot node editor options must be a sequence")
+        options: list[tuple[str, str]] = []
+        for option in raw_options:
+            label = _required_text(getattr(option, "key", None), "lot node editor option label")
+            option_value = _required_text(getattr(option, "value", None), "lot node editor option value")
+            options.append((label, option_value))
+        result[name] = tuple(options)
+    return result
+
+
+def _is_sensitive_field_name(name: str) -> bool:
+    return "secret" in name or "payment_msg" in name or "csrf" in name
 
 
 def _map_library_error(error: BaseException) -> FunPayError:
