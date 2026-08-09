@@ -226,6 +226,26 @@ MIGRATIONS: tuple[Migration, ...] = (
             "CREATE INDEX IF NOT EXISTS idx_own_lot_registry_classification ON own_lot_registry(classification, mapping_state)",
         ),
     ),
+    (
+        6,
+        "local service catalog",
+        (
+            """CREATE TABLE IF NOT EXISTS service_catalog (
+                stable_code TEXT PRIMARY KEY,
+                family TEXT NOT NULL CHECK (family IN ('mythic_plus', 'delves')),
+                variant_json TEXT NOT NULL,
+                enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+                desired_state TEXT NOT NULL CHECK (desired_state IN ('enabled', 'disabled')),
+                template_reference TEXT NOT NULL,
+                description_profile TEXT NOT NULL,
+                price_policy_reference TEXT NOT NULL,
+                price_conditions_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_service_catalog_family ON service_catalog(family, enabled)",
+        ),
+    ),
 )
 
 

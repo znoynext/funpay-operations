@@ -16,6 +16,8 @@ Copyright (c) 2026 znoynext. **All Rights Reserved.**
 - Separate modules for FunPay, Telegram, lots, pricing, messages, and tasks.
 - Independent Mythic+ and Delves service models with stable internal codes,
   validation, serialization, and in-memory duplicate protection.
+- A configurable local Service Catalog that expands future Mythic+ and Delves
+  variants without creating FunPay lots.
 - Versioned public YAML seasonal-data records and a fail-closed description
   preview generator for Mythic+ and Delves.
 - Configuration from `.env` and YAML, with safe sample files only.
@@ -39,6 +41,36 @@ validate tier, Bountiful status, region, service format, package size, and
 normalized price conditions. Codes are deterministic (for example, `mplus_10_selfplay_x1` and
 `delve_t8_bountiful_selfplay_x1`); the deduplication key also includes regional
 and price-condition variants where relevant.
+
+## Local Service Catalog
+
+The catalog is a separate local planning layer for future services. It has no
+FunPay or Telegram dependency and cannot create a lot. `catalog init-example`
+copies a safe public fixture into ignored `data/service_catalog.json` and seeds
+ignored `data/service_catalog.sqlite3`. Edit only that local JSON for your
+ranges, regions, formats, package sizes, references, and price-affecting
+condition values.
+
+```powershell
+funpay-operations catalog init-example
+funpay-operations catalog validate
+funpay-operations catalog preview
+```
+
+Mythic+ uses configurable `min_key_level`/`max_key_level`, regions,
+self-play/pilot formats, and package sizes (which must include `x1`). Delves
+uses independently configurable tier bounds, `normal`/`bountiful` modes,
+regions, optional formats, and package sizes. No current game range is a
+hard-coded catalog rule; only generic positive technical bounds are enforced.
+
+Each generated SQLite record contains a stable code, family, variant,
+enabled flag, desired state, template reference, description profile,
+price-policy reference, and normalized price conditions. Stable codes are
+deterministic: `mplus_k{level}_{region}_{format}_x{size}` and
+`delve_t{tier}_{mode}_{region}_{format}_x{size}`, followed by sorted
+`_{condition}_{value}` suffixes. Validation rejects reversed/invalid ranges,
+missing `x1`, duplicate package sizes or choices, unsupported formats/modes,
+condition names that conflict with variants, and duplicate stable codes.
 
 ## Seasonal data and description previews
 
