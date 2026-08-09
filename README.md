@@ -222,6 +222,27 @@ auto-reply, automated outbound messages, and Telegram-to-FunPay replies. It
 does not stop incoming notification polling. Allowlisted private-chat checks
 remain mandatory for every control action.
 
+## Windows standalone installation
+
+Generic builds use PyInstaller. `scripts/build_windows.ps1` produces a
+background `dist/funpay-operations.exe` (no console) and a debug/CLI
+`dist/funpay-operations-cli.exe`; neither contains user configuration, DPAPI
+secrets, databases, logs, or customer data. CI builds the generic CLI artifact
+on `windows-latest` and runs `diagnostics` without external credentials.
+
+Per-user files live below `%LOCALAPPDATA%\FunPay Operations`: application,
+config, and separate `data` subdirectories for DPAPI secrets, SQLite, logs,
+and backups. Updating the executable leaves these directories untouched;
+uninstalling the executable also preserves them until the user deliberately
+removes them.
+
+Run `funpay-operations first-run` to create and validate the local structure.
+`funpay-operations diagnostics` reports absent FunPay and Telegram secrets as
+`not_configured`. Autostart commands are `install-autostart`,
+`remove-autostart`, `show-autostart-status`, and `repair-autostart`. The task
+`FunPay Operations Background` is per current user, uses `ONLOGON` with a
+30-second delay and limited privileges, and invokes the noconsole executable.
+
 ## Seasonal data and description previews
 
 Public seasonal metadata lives under `seasonal_data/v1/` and includes only

@@ -1,0 +1,15 @@
+name: Windows generic build
+on: [pull_request, workflow_dispatch]
+permissions: { contents: read }
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: python -m pip install . pyinstaller
+      - run: pyinstaller --noconfirm --clean --onefile --console --name funpay-operations-cli scripts/windows_entrypoint.py
+      - run: .\dist\funpay-operations-cli.exe diagnostics
+      - uses: actions/upload-artifact@v4
+        with: { name: funpay-operations-generic-windows; path: dist/funpay-operations-cli.exe }
