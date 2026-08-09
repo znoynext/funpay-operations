@@ -70,26 +70,19 @@ operations:
             with self.assertRaises(ConfigurationError):
                 load_settings(config_path=config, env_path=root / ".env")
 
-    def test_validates_read_only_funpay_options(self) -> None:
+    def test_loads_native_funpay_polling_options_without_manual_endpoints(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             config = root / "config.yaml"
             config.write_text(
-                "funpay:\n  read_endpoints:\n    profile: https://example.invalid/profile\n",
-                encoding="utf-8",
-            )
-            with self.assertRaises(ConfigurationError):
-                load_settings(config_path=config, env_path=root / ".env")
-
-            config.write_text(
                 "funpay:\n  request_timeout_seconds: 20\n  min_request_interval_seconds: 0.5\n"
-                "  retry_attempts: 2\n  read_endpoints:\n    profile: /account/profile\n",
+                "  retry_attempts: 2\n",
                 encoding="utf-8",
             )
             settings = load_settings(config_path=config, env_path=root / ".env")
 
         self.assertEqual(settings.funpay_request_timeout_seconds, 20)
-        self.assertEqual(settings.funpay_read_endpoints, (("profile", "/account/profile"),))
+        self.assertEqual(settings.funpay_retry_attempts, 2)
 
     def test_validates_telegram_long_poll_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -116,10 +109,10 @@ telegram:
             with self.assertRaises(ConfigurationError):
                 load_settings(config_path=config, env_path=root / ".env")
 
-    def test_live_operations_require_an_owner_verified_reply_endpoint(self) -> None:
+    def test_live_operations_need_no_manual_reply_endpoint(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             config = root / "config.yaml"
             config.write_text("operations:\n  mode: live\n  enabled: true\n", encoding="utf-8")
-            with self.assertRaises(ConfigurationError):
-                load_settings(config_path=config, env_path=root / ".env")
+            settings = load_settings(config_path=config, env_path=root / ".env")
+        self.assertTrue(settings.operations_enabled)

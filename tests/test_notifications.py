@@ -64,7 +64,7 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(self.sender.sent[0][0], 1001)
         self.assertIn("Покупатель: buyer", self.sender.sent[0][1])
         self.assertIn("Лот/заказ: Lot A", self.sender.sent[0][1])
-        self.assertEqual(self.funpay.cursors, [None, "m-1"])
+        self.assertEqual(self.funpay.cursors, [None, '{"dialog-a":"m-1"}'])
         with self.database.session() as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM telegram_message_links").fetchone()[0], 1)
             self.assertEqual(connection.execute("SELECT telegram_message_id FROM telegram_message_links").fetchone()[0], 1)
@@ -84,6 +84,10 @@ class NotificationTests(unittest.TestCase):
         second_markup = self.sender.sent[1][2]["inline_keyboard"]
         self.assertNotEqual(first_markup[0][0]["callback_data"], second_markup[0][0]["callback_data"])
         self.assertEqual(second_markup[1][0]["url"], "https://funpay.com/chat/example")
+        self.assertEqual(
+            TaskStateRepository(self.database).load("funpay_message_notifications"),
+            ("running", '{"dialog-a":"m-3","dialog-b":"m-2"}'),
+        )
         with self.database.session() as connection:
             rows = connection.execute(
                 """SELECT d.external_id, COUNT(link.id) AS links
@@ -103,4 +107,7 @@ class NotificationTests(unittest.TestCase):
         self.funpay.messages = (self.message("m-4", "dialog-c"),)
         self.notifier.sync()
         self.assertEqual(len(self.sender.sent), 1)
-        self.assertEqual(TaskStateRepository(self.database).load("funpay_message_notifications"), ("running", "m-4"))
+        self.assertEqual(
+            TaskStateRepository(self.database).load("funpay_message_notifications"),
+            ("running", '{"dialog-c":"m-4"}'),
+        )

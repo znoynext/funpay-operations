@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Mapping, Protocol
 from urllib.parse import urlparse
@@ -49,7 +50,10 @@ class FunPayMessageNotifier:
         for message in messages:
             if not self._process(message, allow_auto_reply=not initial_auto_reply_sync):
                 return
-            self._states.save("funpay_message_notifications", "running", message.message_id)
+            self._states.save(
+                "funpay_message_notifications", "running", _advance_cursor(cursor, message)
+            )
+            cursor = _advance_cursor(cursor, message)
         if initial_auto_reply_sync:
             self._auto_replies.mark_initialized()
 
@@ -103,3 +107,15 @@ def _is_safe_funpay_url(value: str | None) -> bool:
         return False
     parsed = urlparse(value)
     return parsed.scheme == "https" and parsed.hostname == "funpay.com"
+
+
+def _advance_cursor(previous: str | None, message: FunPayMessage) -> str:
+    """Persist each dialog's last external message identifier locally."""
+
+    try:
+        parsed = json.loads(previous) if previous else {}
+    except json.JSONDecodeError:
+        parsed = {}
+    cursors = parsed if isinstance(parsed, dict) else {}
+    cursors[message.dialog_id] = message.message_id
+    return json.dumps(cursors, sort_keys=True, separators=(",", ":"))
