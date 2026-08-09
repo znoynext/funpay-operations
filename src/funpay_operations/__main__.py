@@ -26,7 +26,7 @@ from .setup_wizard import SecretStore
 from .smoke import run_smoke_test
 from .windows_infra import (
     autostart_status, diagnostics, diagnostics_summary, first_run, install_autostart, install_current_build,
-    remove_autostart, resolve_background_executable, resolve_windows_paths, run_setup_wizard, safe_config_path,
+    install_start_menu_shortcut, remove_autostart, resolve_background_executable, resolve_windows_paths, run_setup_wizard, safe_config_path,
     WindowsSetupError,
 )
 
@@ -96,12 +96,22 @@ def main() -> int:
             return 0
         if args.command in {"setup", "install"}:
             try:
-                background, _ = install_current_build(paths)
+                background, _, setup_executable = install_current_build(paths)
             except WindowsSetupError:
                 # Development and CI may run this Python entry point directly.
-                # The wizard remains useful but intentionally never invents an
-                # autostart target when no standalone build exists.
+                # There is no generic build to install, so the wizard never
+                # invents an autostart target. A packaged installer failure is
+                # instead surfaced rather than silently declared successful.
+                if Path(sys.executable).name.casefold() in {
+                    "funpay-operations.exe", "funpay-operations-cli.exe", "funpay-operations-setup.exe",
+                }:
+                    return 1
                 background = None
+            else:
+                try:
+                    install_start_menu_shortcut(setup_executable)
+                except WindowsSetupError:
+                    return 1
             try:
                 return run_setup_wizard(
                     paths, sys.stdout, installed_background=background,

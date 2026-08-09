@@ -11,6 +11,7 @@ from .database import Database
 from .funpay import FunPayClient
 from .funpay import FunPaySessionExpired
 from .notifications import FunPayMessageNotifier
+from .repositories import TaskStateRepository
 from .session_health import FunPaySessionGuard
 from .runtime import (
     BackgroundSupervisor,
@@ -36,10 +37,14 @@ class BackgroundRunner:
         self, settings: Settings, database: Database, logger: logging.Logger, *, funpay: FunPayClient | None = None,
         telegram: TelegramLongPollingBot | None = None, notifications: FunPayMessageNotifier | None = None,
         session_guard: FunPaySessionGuard | None = None, session_expired_callback: Callable[[], None] | None = None,
+        telegram_enabled: bool | None = None,
     ) -> None:
         self.settings, self.database, self.logger = settings, database, logger
         self.funpay, self.telegram, self.notifications = funpay, telegram, notifications
         self.session_guard, self.session_expired_callback = session_guard, session_expired_callback
+        self.telegram_enabled = settings.telegram_enabled if telegram_enabled is None else telegram_enabled
+        self.runtime_states = TaskStateRepository(database)
+        self._shutdown_requested = asyncio.Event()
         disabled = DisabledAdapter()
         recovery = RecoveryCoordinator(tuple(
             RecoveryStep(name, disabled.run) for name in RecoveryCoordinator.ORDER
@@ -57,6 +62,7 @@ class BackgroundRunner:
                 BackgroundTask("raise-scheduler", disabled.run, settings.poll_interval_seconds),
                 BackgroundTask("recovery-coordinator", disabled.run, settings.poll_interval_seconds),
                 BackgroundTask("sqlite-maintenance", self._maintain_storage, settings.backup_interval_seconds),
+                BackgroundTask("runtime-control", self._check_shutdown_request, 0.5),
             ),
             logger=logger,
             backoff=ExponentialBackoff(settings.reconnect_initial_seconds, settings.reconnect_max_seconds),
@@ -66,10 +72,21 @@ class BackgroundRunner:
     async def run(self, *, once: bool) -> None:
         applied = apply_windows_process_priority(ProcessPriority.BELOW_NORMAL)
         self.logger.info("Background runtime started; windows_below_normal_priority=%s", applied)
-        if once:
-            await self.run_cycle()
-            return
-        await self.supervisor.run_forever()
+        self.runtime_states.save("background_runtime", "running")
+        self.runtime_states.save("background_control", "running")
+        try:
+            if once:
+                await self.run_cycle()
+                return
+            supervisor_task = asyncio.create_task(self.supervisor.run_forever())
+            shutdown_wait = asyncio.create_task(self._shutdown_requested.wait())
+            done, _ = await asyncio.wait((supervisor_task, shutdown_wait), return_when=asyncio.FIRST_COMPLETED)
+            if shutdown_wait in done:
+                await self.supervisor.shutdown()
+            await supervisor_task
+            shutdown_wait.cancel()
+        finally:
+            self.runtime_states.save("background_runtime", "stopped")
 
     async def shutdown(self) -> None:
         await self.supervisor.shutdown()
@@ -106,7 +123,7 @@ class BackgroundRunner:
         return None
 
     async def _poll_telegram(self) -> TaskDisposition | None:
-        if not self.settings.telegram_enabled or self.telegram is None or self.telegram.is_stopped:
+        if not self.telegram_enabled or self.telegram is None or self.telegram.is_stopped:
             return TaskDisposition.DISABLED
         await asyncio.to_thread(self.telegram.poll_once)
         return None
@@ -114,3 +131,8 @@ class BackgroundRunner:
     async def _maintain_storage(self) -> None:
         await asyncio.to_thread(self.maintenance.integrity_check)
         await asyncio.to_thread(self.maintenance.backup)
+
+    async def _check_shutdown_request(self) -> None:
+        current = self.runtime_states.load("background_control")
+        if current is not None and current[0] == "shutdown_requested":
+            self._shutdown_requested.set()
