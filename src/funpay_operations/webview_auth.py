@@ -50,14 +50,19 @@ class AuthSessionCandidate:
 
 
 Runner = Callable[[list[str], Path], int]
+Unprotector = Callable[[bytes], bytes]
 
 
 class WebView2AuthLauncher:
     """Launch only the installed helper with a freshly-created owned profile."""
 
-    def __init__(self, paths: WindowsPaths, *, runner: Runner | None = None) -> None:
+    def __init__(
+        self, paths: WindowsPaths, *, runner: Runner | None = None,
+        unprotector: Unprotector = unprotect_for_current_user,
+    ) -> None:
         self.paths = paths
         self._runner = runner or self._run_process
+        self._unprotect = unprotector
 
     @property
     def helper(self) -> Path:
@@ -143,7 +148,7 @@ class WebView2AuthLauncher:
         result = profile / AUTH_RESULT_NAME
         try:
             protected = base64.b64decode(result.read_text(encoding="ascii"), validate=True)
-            payload = json.loads(unprotect_for_current_user(protected).decode("utf-8"))
+            payload = json.loads(self._unprotect(protected).decode("utf-8"))
         except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError, SecretStoreError) as error:
             raise WebViewAuthError("local authentication result is unavailable") from error
         finally:

@@ -8,7 +8,6 @@ import unittest
 from unittest.mock import patch
 
 from funpay_operations.setup_services import FunPaySetupService
-from funpay_operations.setup_wizard import protect_for_current_user
 from funpay_operations.webview_auth import (
     AUTH_HELPER_NAME,
     AUTH_PROFILE_PREFIX,
@@ -31,11 +30,12 @@ class WebViewAuthTests(unittest.TestCase):
                 return code
             profile = Path(command[2])
             if payload is not None:
-                protected = protect_for_current_user(json.dumps(payload).encode("utf-8"))
-                (profile / AUTH_RESULT_NAME).write_text(base64.b64encode(protected).decode("ascii"), encoding="ascii")
+                (profile / AUTH_RESULT_NAME).write_text(
+                    base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii"), encoding="ascii"
+                )
             return code
 
-        return WebView2AuthLauncher(paths, runner=runner)
+        return WebView2AuthLauncher(paths, runner=runner, unprotector=lambda payload: payload)
 
     def test_valid_candidate_is_selected_from_dpapi_result_and_profile_is_removed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
