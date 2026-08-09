@@ -9,6 +9,7 @@ from funpay_operations.telegram import (
     TelegramCommandHandler,
     TelegramLongPollingBot,
     TelegramUpdate,
+    _parse_update,
 )
 
 
@@ -96,3 +97,13 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(enabled.text, "Автоответ включен.")
         self.assertEqual(disabled.text, "Автоответ выключен.")
         self.assertEqual(self.states.load("funpay_auto_reply"), ("disabled", None))
+
+    def test_malformed_callback_message_identifier_is_ignored(self) -> None:
+        self.assertIsNone(_parse_update({
+            "update_id": 1,
+            "callback_query": {
+                "data": "ux:1",
+                "from": {"id": 1001},
+                "message": {"message_id": 0, "from": {"id": 1001}, "chat": {"id": 1001}},
+            },
+        }))

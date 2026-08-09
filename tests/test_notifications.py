@@ -62,8 +62,8 @@ class NotificationTests(unittest.TestCase):
 
         self.assertEqual(len(self.sender.sent), 1)
         self.assertEqual(self.sender.sent[0][0], 1001)
-        self.assertIn("Покупатель: buyer", self.sender.sent[0][1])
-        self.assertIn("Лот/заказ: Lot A", self.sender.sent[0][1])
+        self.assertIn("💬 buyer", self.sender.sent[0][1])
+        self.assertIn("Lot A", self.sender.sent[0][1])
         self.assertEqual(self.funpay.cursors, [None, '{"dialog-a":"m-1"}'])
         with self.database.session() as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM telegram_message_links").fetchone()[0], 1)

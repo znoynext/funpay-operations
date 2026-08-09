@@ -53,7 +53,7 @@ class ReplyRouterTests(unittest.TestCase):
         result = self.router.handle(self.update(1, "Ответ для Alice", reply_to=71))
         duplicate = self.router.handle(self.update(1, "Ответ для Alice", reply_to=71))
 
-        self.assertEqual(result.text, "Ответ покупателю отправлен.")
+        self.assertEqual(result.text, "✅ Отправлено Alice")
         self.assertEqual(duplicate.text, "Ответ уже был отправлен.")
         self.assertEqual(self.reply_client.calls, [
             ("funpay-alice", "Alice", "Ответ для Alice", "telegram-update-1")
@@ -64,7 +64,7 @@ class ReplyRouterTests(unittest.TestCase):
         prompt = self.router.handle(self.update(2, callback=f"funpay_reply:{self.alice_id}"))
         result = self.router.handle(self.update(3, "Следующее сообщение"))
         self.assertEqual(prompt.text, "Напишите ответ в течение 5 минут.")
-        self.assertEqual(result.text, "Ответ покупателю отправлен.")
+        self.assertEqual(result.text, "✅ Отправлено Alice")
         self.assertEqual(self.reply_client.calls[0][0:2], ("funpay-alice", "Alice"))
 
         self.router.handle(self.update(4, callback=f"funpay_reply:{self.bob_id}"))
@@ -89,7 +89,7 @@ class ReplyRouterTests(unittest.TestCase):
 
         self.reply_client.fail = False
         retried = self.router.handle(self.update(9, callback="funpay_retry:1"))
-        self.assertEqual(retried.text, "Ответ покупателю отправлен.")
+        self.assertEqual(retried.text, "✅ Отправлено Alice")
         self.assertEqual(self.reply_client.calls[0][3], self.reply_client.calls[1][3])
 
         self.reply_client.fail = True
