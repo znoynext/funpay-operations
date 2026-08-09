@@ -103,6 +103,24 @@ The price value is deliberately only a placeholder at this stage. A seasonal
 description marked unconfirmed is blocked; it can proceed only when local
 configuration supplies an explicit safe-neutral template.
 
+## Trusted seller matching (mock-only)
+
+`trusted_sellers` is a local technical engine with no FunPay connection and no
+real seller fixtures. It stores mock seller profiles, manually confirmed
+competitor-lot-to-service mappings, and only a hash of each lot's material
+title/form-fields/options snapshot. Matching accepts a service automatically
+only as an `exact` result: category, region, Mythic+ key level or Delves tier
+and normal/Bountiful mode, service format, package size, and every substantial
+condition must agree. Missing input is `insufficient_data`; no candidate is
+`incompatible`; multiple complete candidates are `ambiguous` and are never
+chosen.
+
+The local `ManualSellerConfirmationAPI` adds mock sellers, enables an explicit
+confirmation or remap only for an enabled verified seller and an exact result,
+and supports disable/remove actions. A changed title, form field, or form
+option invalidates its mapping and marks it `revalidation_required`; no
+automatic remapping occurs.
+
 ## Seasonal data and description previews
 
 Public seasonal metadata lives under `seasonal_data/v1/` and includes only
