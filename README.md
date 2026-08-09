@@ -20,9 +20,8 @@ Copyright (c) 2026 znoynext. **All Rights Reserved.**
   preview generator for Mythic+ and Delves.
 - Configuration from `.env` and YAML, with safe sample files only.
 - A Windows DPAPI setup command for local secret storage. It never writes secrets to Git or `.env`.
-- A read-only FunPay client boundary with normalized profiles, lots, dialogs, and
-  messages. It uses only authenticated `GET` requests, retries transient network
-  failures with a bound, and enforces a per-client request interval.
+- A native FunPay adapter with normalized profiles, lots, dialogs, and messages,
+  backed by the pinned `fpx-engine` library rather than owner-supplied endpoints.
 - Rotating local logs under the ignored `data/` directory.
 
 The scaffold deliberately contains no browser automation, mouse/keyboard control,
@@ -77,12 +76,15 @@ without echoing it and encrypts it with DPAPI for the current Windows user.
 ```powershell
 funpay-setup init
 funpay-setup set telegram_bot_token
-funpay-setup set funpay_session
+funpay-setup set-funpay-session
 funpay-setup diagnostics
 ```
 
-`config.yaml` contains only logical secret key names, allowlisted Telegram user
-IDs, operating mode, polling/reconnect intervals, and relative local paths.
+`set-funpay-session` prompts separately for `golden_key` and `golden_seal`, then
+stores one JSON session value only in the current Windows user's DPAPI store.
+It never prints either cookie. `config.yaml` contains only logical secret key
+names, allowlisted Telegram user IDs, operating mode, and polling/reconnect
+intervals.
 Supported modes are `safe`, `dry_run`, and `live`; `safe` is the default and
 does not permit real operations. Diagnostics report secret presence only as
 `<masked>` or `<missing>`.
@@ -105,8 +107,8 @@ yet available. The token is never read by CI or stored in Git.
 
 ## New FunPay-message notifications
 
-To enable notifications, configure an owner-verified `new_messages` endpoint,
-set `funpay.message_notifications_enabled: true`, and set
+To enable notifications, store the local DPAPI FunPay session, set
+`funpay.message_notifications_enabled: true`, and set
 `telegram.notification_user_id` to one of the allowlisted IDs in ignored local
 `config.yaml`. Each locally stored incoming message is linked to the resulting
 Telegram message and dialog before its cursor advances. Outgoing FunPay messages
@@ -120,8 +122,11 @@ next private Telegram message within five minutes. The application resolves the
 dialog only from its local notification link, checks the recorded buyer, and
 records an idempotency key before a send. On failure it exposes Retry and Cancel
 buttons. Actual FunPay sends remain disabled until the local configuration is in
-`live` mode and has an owner-verified `funpay.reply_endpoint` that honours the
-idempotency key; CI uses no such configuration or session.
+`live` mode with `operations.enabled: true`; CI uses neither a session nor a
+network connection to FunPay. FunPay does not document server-side idempotency
+for sends. The application keeps local durable reply-attempt keys to avoid
+duplicate processing of the same Telegram update, but a retry after an unknown
+network outcome can still be at-least-once.
 
 ## Automatic first reply
 
@@ -135,19 +140,38 @@ trigger another greeting, including after periods of inactivity or an
 application restart. Telegram notification delivery precedes the automatic reply
 and remains available even if that reply fails.
 
-## FunPay read integration
+## FunPay integration
 
-FunPay does not provide a documented, stable public seller API contract. The
-project therefore does not ship guessed endpoints or a browser automation
-workaround. Configure only owner-verified **relative** GET paths under
-`funpay.read_endpoints` in the ignored local `config.yaml`; the supported
-placeholder names are `{seller_id}`, `{after_message_id}`, and `{lot_id}`.
-Until a path is configured, that capability fails closed. The adapter accepts a
-session only through a callable backed by the ignored Windows DPAPI store and
-does not log, print, commit, or send it to CI. It rejects HTTP 401/403 as an
-expired session and represents unavailable networking separately from malformed
-responses. No endpoint in this release can create, edit, delete, send, or bump
-anything on FunPay.
+FunPay does not publish a documented public seller API. This project therefore
+uses the pinned [`fpx-engine` 0.7.4](https://pypi.org/project/fpx-engine/0.7.4/)
+adapter (MIT) behind its own `FunPayClient`; it does not contain guessed endpoint
+paths or a browser workaround. The pinned release maps to
+[`funpayx/fpx` commit `34871cc14851`](https://github.com/funpayx/fpx/commit/34871cc14851)
+and uses FunPay's `golden_key` plus `golden_seal` cookies. The adapter performs
+authenticated profile, own/other seller lots, dialogs, message polling, and
+buyer-message sends only. It reads a session only through the ignored Windows
+DPAPI store and never logs, prints, commits, sends it to Telegram, or exposes it
+to CI.
+
+`fpx-engine` provides polling rather than a FunPay webhook/event listener. The
+adapter polls chats at the configured message interval, asks each changed dialog
+for messages newer than the durable local cursor, normalizes only valid
+non-system events, and lets SQLite de-duplicate persistent delivery. That makes
+reconnect recovery safe without inventing an event contract. A future bump step
+can read each owned lot's category-node metadata, but this version never calls
+the library methods for pricing, creating, changing, enabling, disabling, or
+raising lots.
+
+Run the read-only local integration check after storing the session:
+
+```powershell
+funpay-operations smoke-test --config config.yaml
+```
+
+It verifies the local session format, authorization, profile, own-lot read,
+latest-dialog read, and client closure. Its output contains only success states
+and aggregate lot/dialog counts: no cookies, message text, buyer names, or full
+external IDs.
 
 Migrations run automatically at startup. They are idempotent, applied inside a
 transaction, and preserve the initial scaffold tables for compatibility. A

@@ -142,6 +142,11 @@ def main() -> int:
     set_value_command = subcommands.add_parser("set", help="prompt for and store a secret with DPAPI")
     set_value_command.add_argument("key", help="logical secret key, for example telegram_bot_token")
     set_value_command.add_argument("--store", type=Path, default=Path("data") / "secrets.dpapi")
+    set_funpay_session = subcommands.add_parser(
+        "set-funpay-session", help="prompt for the two FunPay session cookies and store one DPAPI value"
+    )
+    set_funpay_session.add_argument("--key", default="funpay_session", help="logical DPAPI key for the session")
+    set_funpay_session.add_argument("--store", type=Path, default=Path("data") / "secrets.dpapi")
     diagnostics = subcommands.add_parser("diagnostics", help="show only masked secret presence")
     diagnostics.add_argument("--store", type=Path, default=Path("data") / "secrets.dpapi")
     diagnostics.add_argument("keys", nargs="*", default=["telegram_bot_token", "funpay_session"])
@@ -154,6 +159,14 @@ def main() -> int:
     if args.command == "set":
         value = getpass.getpass(f"Secret value for {args.key}: ")
         SecretStore(args.store).set(args.key, value)
+        print(f"Stored {args.key} with Windows DPAPI for the current user.")
+        return 0
+    if args.command == "set-funpay-session":
+        golden_key = getpass.getpass("FunPay golden_key: ")
+        golden_seal = getpass.getpass("FunPay golden_seal: ")
+        if not golden_key or not golden_seal:
+            raise SecretStoreError("FunPay session cookies must be non-empty")
+        SecretStore(args.store).set(args.key, json.dumps({"golden_key": golden_key, "golden_seal": golden_seal}))
         print(f"Stored {args.key} with Windows DPAPI for the current user.")
         return 0
     for key, state in SecretStore(args.store).diagnostics(tuple(args.keys)).items():

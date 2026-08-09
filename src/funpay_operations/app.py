@@ -29,7 +29,7 @@ class Application:
         self.funpay = build_read_client(
             settings, secret_store
         )
-        self.funpay_replies = build_reply_client(settings, secret_store)
+        self.funpay_replies = build_reply_client(settings, self.funpay)
         self.telegram = build_telegram_bot(settings, secret_store, self.task_states, self.logger)
         self.telegram.set_interaction_router(
             FunPayReplyRouter(
@@ -62,4 +62,7 @@ class Application:
         self.settings.backups_directory.mkdir(parents=True, exist_ok=True)
         self.database.initialize()
         self.logger.info("Application started in %s environment", self.settings.environment)
-        await self.runner.run(once=once)
+        try:
+            await self.runner.run(once=once)
+        finally:
+            self.funpay.close()

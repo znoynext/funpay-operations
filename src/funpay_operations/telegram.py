@@ -296,7 +296,7 @@ def build_telegram_bot(settings: Any, local_secret_store: Any, states: TaskState
     api = TelegramHttpApi(token_provider, timeout_seconds=settings.telegram_long_poll_timeout_seconds + 10)
     handler = TelegramCommandHandler(
         settings.allowed_telegram_user_ids, states, logger,
-        auto_reply_available=settings.operations_enabled and bool(settings.funpay_reply_endpoint),
+        auto_reply_available=settings.operations_enabled,
     )
     return TelegramLongPollingBot(api, handler, states, logger, timeout_seconds=settings.telegram_long_poll_timeout_seconds)
 

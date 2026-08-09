@@ -6,16 +6,22 @@ import argparse
 import asyncio
 import os
 from pathlib import Path
+import sys
 
 from dotenv import load_dotenv
 
 from .app import Application
+from .config import load_settings
+from .funpay import build_read_client
 from .seasonal import DescriptionGenerator, SeasonalDataError, load_seasonal_data
 from .services import DelveService, MythicPlusService, Region, ServiceFormat
+from .setup_wizard import SecretStore
+from .smoke import run_smoke_test
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the FunPay operations background scaffold.")
+    parser.add_argument("command", nargs="?", choices=["smoke-test"], help="run a read-only integration smoke test")
     parser.add_argument("--config", type=Path, help="YAML configuration path (takes priority over .env)")
     parser.add_argument("--env-file", type=Path, default=Path(".env"), help="dotenv configuration path")
     parser.add_argument("--once", action="store_true", help="Run one safe background cycle and exit")
@@ -45,6 +51,10 @@ def main() -> int:
 
     load_dotenv(dotenv_path=args.env_file, override=False)
     config_path = args.config or Path(os.getenv("FUNPAY_MANAGER_CONFIG", "config.yaml"))
+    if args.command == "smoke-test":
+        settings = load_settings(config_path=config_path, env_path=args.env_file)
+        client = build_read_client(settings, SecretStore(settings.data_directory / "secrets.dpapi"))
+        return run_smoke_test(client, output=sys.stdout)
     application = Application.from_files(config_path, args.env_file)
     asyncio.run(application.run(once=args.once))
     return 0

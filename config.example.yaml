@@ -19,20 +19,14 @@ operations:
 
 funpay:
   credential_key: funpay_session
-  # No official seller API contract is configured here. Add only owner-verified
-  # relative GET paths; values may use {seller_id}, {after_message_id}, {lot_id}.
-  read_endpoints: {}
   request_timeout_seconds: 15
   min_request_interval_seconds: 1.0
   retry_attempts: 3
-  # Reading remains disabled until both the local endpoint and Telegram target
-  # are explicitly configured below.
+  # Reading uses the pinned fpx-engine adapter and the local DPAPI session.
   message_notifications_enabled: false
   message_poll_interval_seconds: 5
-  # Required only for local live mode; this owner-verified endpoint must honour
-  # the idempotency_key field used for buyer replies.
-  reply_endpoint: ""
-  # Telegram can override this locally after live mode is enabled.
+  # Telegram can override this locally after live mode is enabled. No lot,
+  # price, or bump operation is implemented.
   auto_reply_enabled: false
 
 telegram:
