@@ -313,6 +313,23 @@ MIGRATIONS: tuple[Migration, ...] = (
             "CREATE INDEX IF NOT EXISTS idx_price_transaction_batches_family ON price_transaction_batches(family, status, created_at)",
         ),
     ),
+    (
+        10,
+        "mock raise coordinator state",
+        (
+            """CREATE TABLE IF NOT EXISTS raise_attempts (
+                operation_key TEXT PRIMARY KEY,
+                family TEXT NOT NULL CHECK (family IN ('mythic_plus', 'delves')),
+                attempted_at TEXT NOT NULL,
+                result TEXT NOT NULL CHECK (result IN (
+                    'scheduled', 'completed', 'blocked', 'unsupported', 'unavailable', 'cooldown', 'failed'
+                )),
+                next_allowed_at TEXT,
+                failure_reason TEXT
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_raise_attempts_family_time ON raise_attempts(family, attempted_at)",
+        ),
+    ),
 )
 
 

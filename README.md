@@ -172,6 +172,22 @@ funpay-operations prices dry-run-update
 funpay-operations prices rollback-preview
 ```
 
+## Mock raise coordination
+
+`RaiseCoordinator` is mock-only. Each run first executes a fresh complete
+price transaction: observation fetch, mapping/anomaly validation, pricing,
+price write, reread, and verification. It then handles Mythic+ and Delves
+independently: only a completed, `safe_for_raise` family can reach the narrow
+raise capability interface. Unsupported, unavailable, and cooldown states are
+recorded honestly without a raise call. The local attempt ledger stores the
+last attempt/result, known `next_allowed_at`, and failure reason; deterministic
+schedule keys prevent duplicate attempts. A configurable local cooldown is an
+abstraction only and never claims to be a FunPay-provided limit.
+
+The existing fpx raise operation is account-wide, rather than per-lot. No
+production raise adapter is composed at this stage, and no real raise can be
+performed by this coordinator.
+
 ## Seasonal data and description previews
 
 Public seasonal metadata lives under `seasonal_data/v1/` and includes only

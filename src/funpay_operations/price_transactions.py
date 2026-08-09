@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import ClassVar, Mapping, Protocol, TextIO
 from uuid import uuid4
@@ -191,6 +191,8 @@ class PriceSnapshotRepository:
 class PriceUpdateCoordinator:
     """Implements snapshot -> write -> reread -> verify with one retry, on mocks only."""
 
+    mock_only: ClassVar[bool] = True
+
     def __init__(
         self, *, observation_adapter: CompetitorObservationAdapter, own_price_adapter: OwnLotPriceAdapter,
         safety_engine: SafetyValidatedPricingEngine, snapshots: PriceSnapshotRepository,
@@ -270,6 +272,7 @@ class PriceUpdateCoordinator:
             self.snapshots.mark(batch_id, FamilyBatchStatus.FAILED, reason)
             self.snapshots.mark_unsafe_for_raise(family, reason)
             return FamilyPriceBatchResult(family, FamilyBatchStatus.FAILED, decisions, outcomes, reason)
+        self._apply_verified_prices(outcomes)
         self.snapshots.mark(batch_id, FamilyBatchStatus.COMPLETED)
         return FamilyPriceBatchResult(family, FamilyBatchStatus.COMPLETED, decisions, outcomes, "writes reread and verified")
 
@@ -291,6 +294,15 @@ class PriceUpdateCoordinator:
             )
             for lot_id, service, old, target in targets
         )
+
+    def _apply_verified_prices(self, outcomes: tuple[LotTransactionResult, ...]) -> None:
+        verified = {item.lot_id: item.target_price_minor for item in outcomes if item.successful}
+        if verified:
+            self.lots = tuple(
+                replace(item, price_state=replace(item.price_state, current_price_minor=verified[item.lot_id]))
+                if item.lot_id in verified else item
+                for item in self.lots
+            )
 
 
 def run_price_transaction_command(action: str, *, database: Database, output: TextIO) -> int:

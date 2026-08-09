@@ -58,6 +58,14 @@ class PriceTransactionIntegrationTests(unittest.TestCase):
         self.assertEqual(adapter.write_calls, [("mplus-lot", 9_900), ("mplus-lot", 9_900)])
         self.assertTrue(batch.lot_results[0].successful)
 
+    def test_verified_price_is_used_by_the_next_fresh_transaction_cycle(self) -> None:
+        adapter = MockOwnLotPriceAdapter({"mplus-lot": 11_000})
+        coordinator, _, _ = _coordinator(self.database, adapter)
+        self.assertEqual(coordinator.run(TransactionMode.EXECUTE).batches[0].status, FamilyBatchStatus.COMPLETED)
+        repeated = coordinator.run(TransactionMode.EXECUTE).batches[0]
+        self.assertEqual(repeated.status, FamilyBatchStatus.COMPLETED)
+        self.assertEqual(adapter.write_calls, [("mplus-lot", 9_900)])
+
     def test_persistent_verification_mismatch_fails_and_marks_family_unsafe(self) -> None:
         adapter = MockOwnLotPriceAdapter({"mplus-lot": 11_000}, stale_write_attempts={"mplus-lot": 2})
         coordinator, _, snapshots = _coordinator(self.database, adapter)
