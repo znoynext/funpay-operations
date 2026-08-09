@@ -23,17 +23,24 @@ jobs:
       - name: Build generic executables
         shell: powershell
         run: .\scripts\build_windows.ps1
-      - name: Run packaged diagnostics
-        shell: powershell
-        run: .\dist\funpay-operations-cli.exe diagnostics
-      - name: Run one safe packaged background cycle
-        shell: powershell
-        run: .\dist\funpay-operations-cli.exe --background --once
-      - name: Run packaged first-install flow without accounts
+      - name: Smoke test all packaged installation paths without accounts
         shell: powershell
         run: |
+          $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP 'funpay-operations-localappdata'
+          $env:APPDATA = Join-Path $env:RUNNER_TEMP 'funpay-operations-appdata'
+          New-Item -ItemType Directory -Force -Path $env:LOCALAPPDATA, $env:APPDATA | Out-Null
+          .\dist\funpay-operations-cli.exe diagnostics
+          .\dist\funpay-operations-cli.exe --background --once
           .\dist\funpay-operations-cli.exe setup --non-interactive
-          .\dist\funpay-operations-cli.exe uninstall
+          $app = Join-Path $env:LOCALAPPDATA 'FunPay Operations\app'
+          'funpay-operations.exe', 'funpay-operations-cli.exe', 'funpay-operations-setup.exe' | ForEach-Object {
+            $path = Join-Path $app $_
+            if (-not (Test-Path -LiteralPath $path) -or (Get-Item -LiteralPath $path).Length -le 0) { throw "Missing installed binary: $_" }
+          }
+          & (Join-Path $app 'funpay-operations-cli.exe') diagnostics
+          & (Join-Path $app 'funpay-operations.exe') --background --once
+          & (Join-Path $app 'funpay-operations-setup.exe') --smoke
+          & (Join-Path $app 'funpay-operations-cli.exe') uninstall
       - name: Upload generic executables only
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -41,3 +48,4 @@ jobs:
           path: |
             dist/funpay-operations.exe
             dist/funpay-operations-cli.exe
+            dist/funpay-operations-setup.exe

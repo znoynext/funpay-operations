@@ -236,11 +236,13 @@ remain mandatory for every control action.
 
 ## Windows standalone installation
 
-Generic builds use PyInstaller. `scripts/build_windows.ps1` produces a
-background `dist/funpay-operations.exe` (no console) and a debug/CLI
-`dist/funpay-operations-cli.exe`; neither contains user configuration, DPAPI
-secrets, databases, logs, or customer data. CI builds the generic CLI artifact
-on `windows-latest` and runs `diagnostics` without external credentials.
+Generic builds use PyInstaller and produce three binaries: background
+`dist/funpay-operations.exe` (no console), technical
+`dist/funpay-operations-cli.exe`, and the normal local GUI
+`dist/funpay-operations-setup.exe` (no console). None contains user
+configuration, DPAPI secrets, databases, logs, or customer data. CI builds all
+three on `windows-latest`, installs them into a temporary per-user directory,
+and executes only safe smoke checks.
 
 Per-user files live below `%LOCALAPPDATA%\FunPay Operations`: application,
 config, and separate `data` subdirectories for DPAPI secrets, SQLite, logs,
@@ -248,19 +250,15 @@ and backups. Updating the executable leaves these directories untouched;
 uninstalling the executable also preserves them until the user deliberately
 removes them.
 
-For normal Windows use, launch the CLI companion once and choose the guided
-setup instead of creating configuration files yourself:
-
-```powershell
-.\funpay-operations-cli.exe setup
-```
-
-The installer copies only the generic executables into the per-user application
-folder, creates the folders and SQLite database, applies migrations, installs
-the per-user autostart task, and displays a seven-step summary. The setup flow
-does not request an account, contact FunPay or Telegram, or enable live
-operations. `--non-interactive` safely chooses **Настроить позже** for each
-optional step, which is useful for a managed installation.
+For normal Windows use, open **FunPay Operations Setup** from the current
+user's Start Menu. It points to the installed GUI and needs neither Python nor
+PowerShell. The developer/managed install flow
+`scripts/install_local_windows.ps1` builds the current checkout, verifies all
+three outputs, atomically updates `%LOCALAPPDATA%\FunPay Operations\app`,
+creates the folders and SQLite database, applies migrations, repairs the
+per-user autostart task, creates or updates the Start Menu shortcut, and opens
+the Setup Center. It fails rather than reporting an installation if any final
+binary is missing or empty.
 
 The guided catalog screen lets an owner choose Mythic+, Delves, ranges, formats
 and packages, shows the number of local services before saving, and stores the
@@ -280,20 +278,22 @@ and starts the noconsole executable. `install-autostart`, `remove-autostart`,
 support. `funpay-operations uninstall` removes only the autostart task and
 explicitly preserves the local data and encrypted secrets.
 
-## Connection setup UX (prepared, not connected)
+## Connection setup UX
 
-The FunPay screen is deliberately a local-only preparation screen at this
-stage. It explains that the bot will use an existing FunPay session, that a
-browser does not need to remain open, and that session data is encrypted for
-the current Windows user. Future session entry uses the existing no-echo DPAPI
-command; neither `golden_key` nor `golden_seal` appears in a screen, log,
-configuration file, Telegram message, CI run, or artifact.
+The Setup Center's **Подключить FunPay** screen uses masked standard text
+fields (including normal paste and selection), explains how to manually find
+the two cookies in the browser, and never attempts to read browser cookies.
+It checks the proposed session through the production read-only adapter before
+saving it, saves only a successful session through Windows DPAPI, reads it back
+through DPAPI, and performs one more read-only authorization check. Neither
+`golden_key` nor `golden_seal` appears in command-line arguments, logs,
+configuration files, SQLite, Telegram, CI, or artifacts.
 
-The Telegram screen similarly keeps the bot token in DPAPI rather than YAML.
-When enabled in a future connection step, it will explain that the token comes
-from the official `@BotFather` flow and that the owner must allowlist their
-Telegram user ID. Neither value is requested by the generic Windows setup
-run, and no real Telegram verification is performed yet.
+The Telegram screen keeps the Bot Token in DPAPI rather than YAML, validates it
+with `getMe`, and displays only the bot username. After the owner presses
+`/start`, Setup Center shows a masked ID and requires an explicit **Это я**
+confirmation. Only then is that account saved in the local allowlist and chosen
+as the notification user; the first sender is never accepted automatically.
 
 If FunPay later rejects a configured session, the local session guard persists
 the `expired` state, blocks outbound FunPay replies, auto-replies, price/lot
@@ -311,6 +311,14 @@ Its **Как восстановить** action contains no cookie and directs th
 private user to the local setup flow. Replacing the local DPAPI session marks a
 new reconnect attempt automatically; a successful read clears the blocked
 state without reinstalling the application.
+
+The main Setup Center never displays YAML, JSON, SQLite paths, raw FunPay IDs,
+or a traceback. **Подробнее** information is redacted before it is written to
+the local setup diagnostics log. **Перезапустить бота** asks the cooperative
+background runtime to shut down, waits for it, and starts only the installed
+noconsole executable. It does not use Task Manager automation. All FunPay lot,
+price, raise, reply, and automated-message writes remain disabled by the safe
+configuration until a separate future authorization step.
 
 ## Seasonal data and description previews
 
@@ -332,7 +340,7 @@ Generate a local-only preview without creating or updating a FunPay lot:
 funpay-operations --preview-seasonal-data seasonal_data/v1/mythic_plus.yaml --preview-key-level 10
 ```
 
-## Local setup
+## Developer-only local setup
 
 ```powershell
 python -m venv .venv
@@ -344,8 +352,10 @@ Copy-Item .env.example .env
 python -m funpay_operations --once
 ```
 
-To store a local secret, use the Windows-only setup wizard; it reads the value
-without echoing it and encrypts it with DPAPI for the current Windows user.
+The commands below are retained only for technical recovery and automated tests.
+Normal users should use the installed Setup Center instead. The legacy
+Windows-only DPAPI wizard reads values without echoing and encrypts them for the
+current Windows user.
 
 ```powershell
 funpay-setup init
@@ -357,8 +367,9 @@ funpay-setup diagnostics
 `set-funpay-session` prompts separately for `golden_key` and `golden_seal`, then
 stores one JSON session value only in the current Windows user's DPAPI store.
 It never prints either cookie. `config.yaml` contains only logical secret key
-names, allowlisted Telegram user IDs, operating mode, and polling/reconnect
-intervals.
+names, operating mode, and polling/reconnect intervals; Setup Center stores a
+confirmed Telegram owner locally without requiring a manually entered numeric
+ID.
 Supported modes are `safe`, `dry_run`, and `live`; `safe` is the default and
 does not permit real operations. Diagnostics report secret presence only as
 `<masked>` or `<missing>`.

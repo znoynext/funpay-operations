@@ -39,6 +39,12 @@ class TelegramUpdate:
     text: str | None
     reply_to_message_id: int | None = None
     callback_data: str | None = None
+    username: str | None = None
+
+
+@dataclass(frozen=True)
+class TelegramBotProfile:
+    username: str
 
 
 @dataclass(frozen=True)
@@ -108,6 +114,15 @@ class TelegramHttpApi:
         if not isinstance(result, list):
             raise TelegramProtocolError("Telegram getUpdates result is not an array")
         return tuple(parsed for item in result if (parsed := _parse_update(item)) is not None)
+
+    def get_me(self) -> TelegramBotProfile:
+        """Validate the supplied token without retaining or logging it."""
+
+        result = self._call("getMe", {}, timeout_seconds=self._timeout_seconds)
+        username = result.get("username") if isinstance(result, dict) else None
+        if not isinstance(username, str) or not username.strip():
+            raise TelegramProtocolError("Telegram getMe result has no username")
+        return TelegramBotProfile(username.lstrip("@"))
 
     def send_message(self, chat_id: int, text: str, *, reply_markup: Mapping[str, Any] | None = None) -> int:
         if not text or len(text) > 4096:
@@ -306,7 +321,7 @@ class MockTelegramApi:
 
 
 def build_telegram_bot(settings: Any, local_secret_store: Any, states: TaskStateStore,
-                       logger: logging.Logger) -> TelegramLongPollingBot:
+                       logger: logging.Logger, *, allowed_user_ids: tuple[int, ...] | None = None) -> TelegramLongPollingBot:
     """Compose the bot without reading the DPAPI token until polling starts."""
 
     def token_provider() -> str | None:
@@ -314,7 +329,7 @@ def build_telegram_bot(settings: Any, local_secret_store: Any, states: TaskState
 
     api = TelegramHttpApi(token_provider, timeout_seconds=settings.telegram_long_poll_timeout_seconds + 10)
     handler = TelegramCommandHandler(
-        settings.allowed_telegram_user_ids, states, logger,
+        allowed_user_ids if allowed_user_ids is not None else settings.allowed_telegram_user_ids, states, logger,
         auto_reply_available=settings.operations_enabled,
     )
     return TelegramLongPollingBot(api, handler, states, logger, timeout_seconds=settings.telegram_long_poll_timeout_seconds)
@@ -328,19 +343,19 @@ def _parse_update(value: Any) -> TelegramUpdate | None:
         parsed = _parse_message(value["update_id"], message)
         if parsed is None:
             return None
-        user_id, chat_id, text, reply_to_message_id = parsed
-        return TelegramUpdate(value["update_id"], user_id, chat_id, text, reply_to_message_id)
+        user_id, chat_id, text, reply_to_message_id, username = parsed
+        return TelegramUpdate(value["update_id"], user_id, chat_id, text, reply_to_message_id, None, username)
     callback = value.get("callback_query")
     if not isinstance(callback, dict) or not isinstance(callback.get("message"), dict):
         return None
     parsed = _parse_message(value["update_id"], callback["message"], sender=callback.get("from"))
     if parsed is None or not isinstance(callback.get("data"), str):
         return None
-    user_id, chat_id, _, message_id = parsed
-    return TelegramUpdate(value["update_id"], user_id, chat_id, None, message_id, callback["data"])
+    user_id, chat_id, _, message_id, username = parsed
+    return TelegramUpdate(value["update_id"], user_id, chat_id, None, message_id, callback["data"], username)
 
 
-def _parse_message(update_id: int, message: Mapping[str, Any], *, sender: Any | None = None) -> tuple[int, int, str | None, int | None] | None:
+def _parse_message(update_id: int, message: Mapping[str, Any], *, sender: Any | None = None) -> tuple[int, int, str | None, int | None, str | None] | None:
     del update_id
     sender = sender if sender is not None else message.get("from")
     chat = message.get("chat")
@@ -354,7 +369,14 @@ def _parse_message(update_id: int, message: Mapping[str, Any], *, sender: Any | 
     if reply_to_message_id is not None and not _is_int(reply_to_message_id):
         return None
     text = message.get("text")
-    return user_id, chat_id, text if isinstance(text, str) else None, reply_to_message_id
+    username = sender.get("username")
+    return (
+        user_id,
+        chat_id,
+        text if isinstance(text, str) else None,
+        reply_to_message_id,
+        username if isinstance(username, str) and username.strip() else None,
+    )
 
 
 def _command_from_text(text: str | None) -> str | None:

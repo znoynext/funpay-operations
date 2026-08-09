@@ -3,15 +3,18 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, TextIO
 from xml.sax.saxutils import escape as xml_escape
+from xml.etree import ElementTree
 
 import yaml
 
@@ -20,7 +23,12 @@ from .runtime import DuplicateProcessError, SingletonProcessLock
 
 TASK_NAME = "FunPay Operations Background"
 SAFE_CONFIG_NAME = "config.yaml"
-INSTALLER_FILES = ("funpay-operations.exe", "funpay-operations-cli.exe")
+INSTALLER_FILES = (
+    "funpay-operations.exe",
+    "funpay-operations-cli.exe",
+    "funpay-operations-setup.exe",
+)
+SETUP_SHORTCUT_NAME = "FunPay Operations Setup.lnk"
 
 @dataclass(frozen=True)
 class WindowsPaths:
@@ -49,6 +57,13 @@ def resolve_windows_paths(local_app_data: Path | None = None) -> WindowsPaths:
     base = root / "FunPay Operations"
     data = base / "data"
     return WindowsPaths(base / "app", base / "config", data, data / "secrets.dpapi", data / "funpay.sqlite3", data / "logs", data / "backups")
+
+
+def start_menu_shortcut_path(app_data: Path | None = None) -> Path:
+    """Return the current user's Start Menu shortcut path without admin rights."""
+
+    root = app_data or Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+    return root / "Microsoft" / "Windows" / "Start Menu" / "Programs" / SETUP_SHORTCUT_NAME
 
 def initialise_windows_install(paths: WindowsPaths) -> None:
     for directory in (paths.application, paths.config, paths.data, paths.logs, paths.backups):
@@ -133,13 +148,37 @@ def save_setup_value(paths: WindowsPaths, name: str, value: object) -> None:
         )
 
 
+def delete_setup_value(paths: WindowsPaths, name: str) -> None:
+    if not name.replace("_", "").isalnum():
+        raise ValueError("setup preference name is invalid")
+    with Database(paths.database).session() as connection:
+        connection.execute("DELETE FROM local_setup_preferences WHERE name = ?", (name,))
+
+
+def configured_telegram_owner_id(database: Database) -> int | None:
+    """Read the explicitly confirmed local owner, never a raw Telegram update."""
+
+    try:
+        with database.session() as connection:
+            row = connection.execute(
+                "SELECT value_json FROM local_setup_preferences WHERE name = 'telegram_owner'"
+            ).fetchone()
+        value = json.loads(row["value_json"]) if row is not None else None
+    except (sqlite3.Error, json.JSONDecodeError):
+        return None
+    user_id = value.get("user_id") if isinstance(value, dict) else None
+    return user_id if isinstance(user_id, int) and user_id > 0 else None
+
+
 def configure_service_catalog(paths: WindowsPaths, definition: dict[str, object]) -> int:
     """Validate and store a user-selected catalog without asking for file paths."""
 
     from .service_catalog import ServiceCatalogRepository, generate_catalog
 
     services = generate_catalog(definition)
-    ServiceCatalogRepository(Database(paths.database)).replace(services)
+    database = Database(paths.database)
+    database.initialize()
+    ServiceCatalogRepository(database).replace(services)
     save_setup_value(paths, "service_catalog_definition", definition)
     return len(services)
 
@@ -182,9 +221,12 @@ def diagnostics(paths: WindowsPaths) -> dict[str, str]:
     try:
         from .setup_wizard import SecretStore, SecretStoreError
 
-        result["funpay"] = "configured" if SecretStore(paths.secrets).get("funpay_session") else "not_configured"
+        store = SecretStore(paths.secrets)
+        result["funpay"] = "configured" if store.get("funpay_session") else "not_configured"
+        result["telegram"] = "configured" if store.get("telegram_bot_token") else "not_configured"
     except (OSError, SecretStoreError):
-        result["funpay"] = "error"
+        result["funpay"] = "error" if paths.secrets.exists() else "not_configured"
+        result["telegram"] = "error" if paths.secrets.exists() else "not_configured"
     try:
         with Database(paths.database).session() as connection:
             catalog_count = connection.execute("SELECT COUNT(*) FROM service_catalog").fetchone()[0]
@@ -194,8 +236,17 @@ def diagnostics(paths: WindowsPaths) -> dict[str, str]:
     except (sqlite3.Error, ValueError, json.JSONDecodeError):
         result["catalog"] = "error"
         result["hard_floors"] = "error"
+    try:
+        from .repositories import TaskStateRepository
+
+        session_state = TaskStateRepository(Database(paths.database)).load("funpay_session")
+        if session_state is not None and session_state[0] == "expired":
+            result["funpay"] = "expired"
+        owner = setup_value(paths, "telegram_owner")
+        result["owner"] = "configured" if isinstance(owner, dict) and isinstance(owner.get("user_id"), int) else "not_configured"
+    except (sqlite3.Error, ValueError, json.JSONDecodeError):
+        result["owner"] = "error"
     result["funpay_adapter"] = "available"
-    result["telegram"] = "not_configured"
     result["autostart"] = autostart_status()
     return result
 
@@ -214,44 +265,96 @@ def first_run(paths: WindowsPaths, *, configure_autostart: bool = False, executa
     return result
 
 
-def installer_source_files(current_executable: Path | None = None) -> tuple[Path, Path]:
-    """Find the two generic PyInstaller files next to the current CLI executable."""
+def _is_nonempty_file(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def installer_source_files(current_executable: Path | None = None) -> tuple[Path, Path, Path]:
+    """Find all generic PyInstaller files beside a standalone executable."""
 
     current = (current_executable or Path(sys.executable)).resolve()
-    cli = current if current.name.casefold() == "funpay-operations-cli.exe" else current.with_name("funpay-operations-cli.exe")
-    background = cli.with_name("funpay-operations.exe")
-    if not cli.is_file() or not background.is_file():
+    directory = current.parent
+    background = directory / "funpay-operations.exe"
+    cli = directory / "funpay-operations-cli.exe"
+    setup = directory / "funpay-operations-setup.exe"
+    if not all(_is_nonempty_file(path) for path in (background, cli, setup)):
         raise WindowsSetupError("standalone application files are unavailable")
-    return background, cli
+    return background, cli, setup
 
 
-def install_application(paths: WindowsPaths, *, source_background: Path, source_cli: Path) -> tuple[Path, Path]:
-    """Copy a generic build to the app directory without touching per-user data."""
+def install_application(
+    paths: WindowsPaths, *, source_background: Path, source_cli: Path, source_setup: Path,
+) -> tuple[Path, Path, Path]:
+    """Atomically install generic binaries without touching per-user data."""
 
-    expected = (source_background.name.casefold(), source_cli.name.casefold())
+    sources = (source_background, source_cli, source_setup)
+    expected = tuple(source.name.casefold() for source in sources)
     if expected != INSTALLER_FILES:
         raise WindowsSetupError("installer files have unexpected names")
-    if not source_background.is_file() or not source_cli.is_file():
+    if not all(_is_nonempty_file(source) for source in sources):
         raise WindowsSetupError("installer files are missing")
     paths.application.mkdir(parents=True, exist_ok=True)
-    installed: list[Path] = []
-    for source in (source_background, source_cli):
-        destination = paths.application / source.name
-        temporary = destination.with_suffix(destination.suffix + ".new")
-        try:
-            temporary.write_bytes(source.read_bytes())
+    installed = tuple(paths.application / source.name for source in sources)
+    staged: list[Path] = []
+    backups: dict[Path, Path] = {}
+    replaced: list[Path] = []
+    try:
+        for source, destination in zip(sources, installed, strict=True):
+            temporary = destination.with_suffix(destination.suffix + ".new")
+            temporary.unlink(missing_ok=True)
+            shutil.copyfile(source, temporary)
+            if not _is_nonempty_file(temporary):
+                raise WindowsSetupError("application file staging failed")
+            staged.append(temporary)
+        for temporary, destination in zip(staged, installed, strict=True):
+            backup = destination.with_suffix(destination.suffix + ".previous")
+            backup.unlink(missing_ok=True)
+            if destination.exists():
+                destination.replace(backup)
+                backups[destination] = backup
             temporary.replace(destination)
-        except OSError as error:
-            raise WindowsSetupError("application files could not be installed") from error
-        installed.append(destination)
-    return installed[0], installed[1]
+            replaced.append(destination)
+        if not all(_is_nonempty_file(path) for path in installed):
+            raise WindowsSetupError("installed application files could not be verified")
+    except OSError as error:
+        for destination in reversed(replaced):
+            backup = backups.get(destination)
+            if backup is not None and backup.exists():
+                destination.unlink(missing_ok=True)
+                backup.replace(destination)
+        raise WindowsSetupError("application files could not be installed") from error
+    except WindowsSetupError:
+        for destination in reversed(replaced):
+            backup = backups.get(destination)
+            if backup is not None and backup.exists():
+                destination.unlink(missing_ok=True)
+                backup.replace(destination)
+        raise
+    finally:
+        for temporary in staged:
+            temporary.unlink(missing_ok=True)
+        for backup in backups.values():
+            backup.unlink(missing_ok=True)
+    return installed
 
 
-def install_current_build(paths: WindowsPaths, current_executable: Path | None = None) -> tuple[Path, Path]:
+def install_current_build(paths: WindowsPaths, current_executable: Path | None = None) -> tuple[Path, Path, Path]:
     """Install the currently launched generic build into its per-user app folder."""
 
-    background, cli = installer_source_files(current_executable)
-    return install_application(paths, source_background=background, source_cli=cli)
+    background, cli, setup = installer_source_files(current_executable)
+    return install_application(paths, source_background=background, source_cli=cli, source_setup=setup)
+
+
+def installed_binaries(paths: WindowsPaths) -> tuple[Path, Path, Path]:
+    """Return all expected installed files only when every one is non-empty."""
+
+    binaries = tuple(paths.application / name for name in INSTALLER_FILES)
+    if not all(_is_nonempty_file(path) for path in binaries):
+        raise WindowsSetupError("installed application files are incomplete")
+    return binaries  # type: ignore[return-value]
 
 def task_scheduler_xml(executable: Path) -> str:
     """Return a Scheduler XML task with command and arguments kept separate."""
@@ -280,7 +383,42 @@ def task_scheduler_command(executable: Path, *, action: str, task_xml: Path | No
         return ["schtasks", "/Delete", "/TN", TASK_NAME, "/F"]
     if action == "status":
         return ["schtasks", "/Query", "/TN", TASK_NAME, "/FO", "LIST"]
+    if action == "xml":
+        return ["schtasks", "/Query", "/TN", TASK_NAME, "/XML"]
     raise ValueError("unsupported autostart action")
+
+
+def _scheduled_task_target(document: str) -> Path | None:
+    try:
+        root = ElementTree.fromstring(document)
+        namespace = {"task": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
+        command = root.findtext(".//task:Actions/task:Exec/task:Command", namespaces=namespace)
+        arguments = root.findtext(".//task:Actions/task:Exec/task:Arguments", namespaces=namespace)
+    except ElementTree.ParseError:
+        return None
+    if not command or arguments != "--background":
+        return None
+    return Path(command)
+
+
+def read_autostart_target(runner: Callable[..., object] = subprocess.run) -> Path | None:
+    try:
+        result = runner(
+            task_scheduler_command(Path("funpay-operations.exe"), action="xml"), check=True, capture_output=True,
+            text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    stdout = getattr(result, "stdout", None)
+    return _scheduled_task_target(stdout) if isinstance(stdout, str) else None
+
+
+def verify_autostart_target(executable: Path, runner: Callable[..., object] = subprocess.run) -> bool:
+    target = read_autostart_target(runner)
+    try:
+        return target is not None and target.resolve() == executable.resolve() and _is_nonempty_file(executable)
+    except OSError:
+        return False
 
 def resolve_background_executable(current_executable: Path | None = None) -> Path:
     """Select the noconsole sibling from a standalone build."""
@@ -296,6 +434,8 @@ def resolve_background_executable(current_executable: Path | None = None) -> Pat
     raise RuntimeError("autostart installation requires the standalone Windows executable")
 
 def install_autostart(executable: Path, runner: Callable[..., object] = subprocess.run) -> None:
+    if not _is_nonempty_file(executable):
+        raise WindowsSetupError("background executable is missing")
     with tempfile.NamedTemporaryFile("w", encoding="utf-16", suffix=".xml", delete=False) as temporary:
         temporary.write(task_scheduler_xml(executable))
         temporary_path = Path(temporary.name)
@@ -304,6 +444,8 @@ def install_autostart(executable: Path, runner: Callable[..., object] = subproce
             task_scheduler_command(executable, action="install", task_xml=temporary_path), check=True,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
+        if runner is subprocess.run and not verify_autostart_target(executable, runner):
+            raise WindowsSetupError("Task Scheduler target could not be verified")
     finally:
         temporary_path.unlink(missing_ok=True)
 
@@ -323,6 +465,126 @@ def autostart_status(runner: Callable[..., object] = subprocess.run) -> str:
         return "installed"
     except (OSError, subprocess.CalledProcessError):
         return "not_configured"
+
+
+def _powershell_single_quoted(value: str) -> str:
+    if "\r" in value or "\n" in value:
+        raise ValueError("Windows shortcut path contains unsafe characters")
+    return "'" + value.replace("'", "''") + "'"
+
+
+def start_menu_shortcut_command(target: Path, shortcut: Path) -> list[str]:
+    """Build a constrained PowerShell command that writes one current-user .lnk."""
+
+    script = (
+        "$shell = New-Object -ComObject WScript.Shell; "
+        f"$link = $shell.CreateShortcut({_powershell_single_quoted(str(shortcut))}); "
+        f"$link.TargetPath = {_powershell_single_quoted(str(target))}; "
+        f"$link.WorkingDirectory = {_powershell_single_quoted(str(target.parent))}; "
+        "$link.Save()"
+    )
+    return ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script]
+
+
+def install_start_menu_shortcut(
+    setup_executable: Path, *, shortcut: Path | None = None, runner: Callable[..., object] = subprocess.run,
+) -> Path:
+    """Create or update the Setup Center shortcut; no desktop shortcut is made."""
+
+    if not _is_nonempty_file(setup_executable):
+        raise WindowsSetupError("setup executable is missing")
+    destination = shortcut or start_menu_shortcut_path()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    runner(
+        start_menu_shortcut_command(setup_executable, destination), check=True,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if runner is subprocess.run and not destination.is_file():
+        raise WindowsSetupError("Start Menu shortcut could not be verified")
+    return destination
+
+
+def start_menu_shortcut_status(shortcut: Path | None = None) -> str:
+    return "installed" if (shortcut or start_menu_shortcut_path()).is_file() else "not_configured"
+
+
+def read_start_menu_shortcut_target(
+    shortcut: Path | None = None, runner: Callable[..., object] = subprocess.run,
+) -> Path | None:
+    """Read only the target of our own Start Menu link for post-install verification."""
+
+    destination = shortcut or start_menu_shortcut_path()
+    if not destination.is_file():
+        return None
+    script = (
+        "$shell = New-Object -ComObject WScript.Shell; "
+        f"$link = $shell.CreateShortcut({_powershell_single_quoted(str(destination))}); "
+        "[Console]::Out.Write($link.TargetPath)"
+    )
+    try:
+        result = runner(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script], check=True,
+            capture_output=True, text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    value = getattr(result, "stdout", None)
+    return Path(value.strip()) if isinstance(value, str) and value.strip() else None
+
+
+def verify_start_menu_shortcut(
+    setup_executable: Path, *, shortcut: Path | None = None, runner: Callable[..., object] = subprocess.run,
+) -> bool:
+    target = read_start_menu_shortcut_target(shortcut, runner)
+    try:
+        return target is not None and target.resolve() == setup_executable.resolve() and _is_nonempty_file(setup_executable)
+    except OSError:
+        return False
+
+
+def background_runtime_status(paths: WindowsPaths) -> str:
+    """Return the last cooperative background runtime state, without process automation."""
+
+    try:
+        from .repositories import TaskStateRepository
+
+        state = TaskStateRepository(Database(paths.database)).load("background_runtime")
+        return "running" if state is not None and state[0] == "running" else "stopped"
+    except sqlite3.Error:
+        return "error"
+
+
+def request_background_shutdown(paths: WindowsPaths) -> None:
+    """Ask the cooperative runtime to finish; it polls this local state itself."""
+
+    from .repositories import TaskStateRepository
+
+    Database(paths.database).initialize()
+    TaskStateRepository(Database(paths.database)).save("background_control", "shutdown_requested")
+
+
+def restart_background(
+    paths: WindowsPaths, *, launcher: Callable[..., object] = subprocess.Popen,
+    wait_seconds: float = 5.0, sleep: Callable[[float], None] = time.sleep,
+) -> Path:
+    """Gracefully stop then relaunch only the installed background executable."""
+
+    background, _, _ = installed_binaries(paths)
+    if background_runtime_status(paths) == "running":
+        request_background_shutdown(paths)
+        deadline = time.monotonic() + wait_seconds
+        while background_runtime_status(paths) == "running" and time.monotonic() < deadline:
+            sleep(0.1)
+        if background_runtime_status(paths) == "running":
+            raise WindowsSetupError("background runtime did not stop in time")
+    try:
+        launcher(
+            [str(background), "--background"], cwd=str(background.parent),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except OSError as error:
+        raise WindowsSetupError("background executable could not be started") from error
+    return background
 
 
 def diagnostics_summary(result: dict[str, str]) -> tuple[str, ...]:

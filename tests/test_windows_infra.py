@@ -18,11 +18,16 @@ from funpay_operations.windows_infra import (
     diagnostics_summary,
     install_application,
     install_autostart,
+    installed_binaries,
+    installer_source_files,
     remove_autostart,
+    read_autostart_target,
+    restart_background,
     resolve_background_executable,
     resolve_windows_paths,
     run_setup_wizard,
     safe_config_path,
+    start_menu_shortcut_command,
     task_scheduler_command,
     task_scheduler_xml,
 )
@@ -65,7 +70,7 @@ class WindowsInfraTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             executable = root / "funpay-operations.exe"
-            executable.touch()
+            executable.write_bytes(b"background")
             data = root / "data" / "owner.sqlite3"
             data.parent.mkdir()
             data.write_bytes(b"owner-local-data")
@@ -131,20 +136,90 @@ class WindowsInfraTests(unittest.TestCase):
             source.mkdir()
             background = source / "funpay-operations.exe"
             cli = source / "funpay-operations-cli.exe"
+            setup = source / "funpay-operations-setup.exe"
             background.write_bytes(b"background-v1")
             cli.write_bytes(b"cli-v1")
+            setup.write_bytes(b"setup-v1")
             paths = resolve_windows_paths(root / "local")
             first_run(paths)
             paths.secrets.write_bytes(b"owner-secret-placeholder")
-            installed_background, installed_cli = install_application(
-                paths, source_background=background, source_cli=cli
+            installed_background, installed_cli, installed_setup = install_application(
+                paths, source_background=background, source_cli=cli, source_setup=setup
             )
             self.assertEqual(installed_background.read_bytes(), b"background-v1")
             self.assertEqual(installed_cli.read_bytes(), b"cli-v1")
+            self.assertEqual(installed_setup.read_bytes(), b"setup-v1")
             background.write_bytes(b"background-v2")
-            install_application(paths, source_background=background, source_cli=cli)
+            install_application(paths, source_background=background, source_cli=cli, source_setup=setup)
             self.assertEqual(installed_background.read_bytes(), b"background-v2")
             self.assertEqual(paths.secrets.read_bytes(), b"owner-secret-placeholder")
+
+    def test_empty_app_directory_is_repaired_from_three_binaries_and_staging_failure_preserves_update(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "dist"
+            source.mkdir()
+            files = []
+            for name, body in (("funpay-operations.exe", b"background"), ("funpay-operations-cli.exe", b"cli"), ("funpay-operations-setup.exe", b"setup")):
+                file = source / name
+                file.write_bytes(body)
+                files.append(file)
+            paths = resolve_windows_paths(root / "local")
+            installed = install_application(paths, source_background=files[0], source_cli=files[1], source_setup=files[2])
+            self.assertEqual(installed_binaries(paths), installed)
+            before = tuple(path.read_bytes() for path in installed)
+            with patch("funpay_operations.windows_infra.shutil.copyfile", side_effect=OSError("interrupted")):
+                with self.assertRaisesRegex(Exception, "could not be installed"):
+                    install_application(paths, source_background=files[0], source_cli=files[1], source_setup=files[2])
+            self.assertEqual(tuple(path.read_bytes() for path in installed), before)
+
+    def test_installer_source_requires_all_three_nonempty_binaries(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            for name in ("funpay-operations.exe", "funpay-operations-cli.exe", "funpay-operations-setup.exe"):
+                (root / name).write_bytes(b"binary")
+            self.assertEqual(tuple(path.name for path in installer_source_files(root / "funpay-operations-cli.exe")), (
+                "funpay-operations.exe", "funpay-operations-cli.exe", "funpay-operations-setup.exe",
+            ))
+            (root / "funpay-operations-setup.exe").write_bytes(b"")
+            with self.assertRaisesRegex(Exception, "unavailable"):
+                installer_source_files(root / "funpay-operations-cli.exe")
+
+    def test_task_target_and_start_menu_commands_are_specific_to_installed_files(self) -> None:
+        executable = Path(r"C:\Users\Owner\AppData\Local\FunPay Operations\app\funpay-operations.exe")
+        task_xml = task_scheduler_xml(executable)
+
+        class XmlRunner:
+            def __call__(self, _command: list[str], **_kwargs: object) -> object:
+                return type("Result", (), {"stdout": task_xml})()
+
+        self.assertEqual(read_autostart_target(XmlRunner()), executable)
+        shortcut = Path(r"C:\Users\Owner\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\FunPay Operations Setup.lnk")
+        command = start_menu_shortcut_command(executable.with_name("funpay-operations-setup.exe"), shortcut)
+        self.assertEqual(command[0], "powershell.exe")
+        self.assertIn("CreateShortcut", command[-1])
+        self.assertNotIn("desktop", command[-1].casefold())
+
+    def test_background_restart_launches_only_installed_background_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "dist"
+            source.mkdir()
+            sources = []
+            for name in ("funpay-operations.exe", "funpay-operations-cli.exe", "funpay-operations-setup.exe"):
+                path = source / name
+                path.write_bytes(b"binary")
+                sources.append(path)
+            paths = resolve_windows_paths(root / "local")
+            install_application(paths, source_background=sources[0], source_cli=sources[1], source_setup=sources[2])
+            calls: list[tuple[object, ...]] = []
+
+            def launcher(*args: object, **kwargs: object) -> None:
+                calls.append((args, kwargs))
+
+            background = restart_background(paths, launcher=launcher)
+            self.assertEqual(background, paths.application / "funpay-operations.exe")
+            self.assertEqual(calls[0][0][0], [str(background), "--background"])
 
     def test_seven_step_wizard_and_human_diagnostics_hide_technical_tracebacks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

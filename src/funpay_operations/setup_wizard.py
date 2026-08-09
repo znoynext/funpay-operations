@@ -107,6 +107,21 @@ class SecretStore:
         temporary_path.write_text(base64.b64encode(encrypted).decode("ascii"), encoding="ascii")
         temporary_path.replace(self.path)
 
+    def delete(self, key: str) -> None:
+        """Remove one DPAPI value after a failed post-save verification."""
+
+        if not key.replace("_", "").isalnum():
+            raise SecretStoreError("secret key is invalid")
+        values = self._read_all()
+        if key not in values:
+            return
+        del values[key]
+        encrypted = protect_for_current_user(json.dumps(values).encode("utf-8"))
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = self.path.with_suffix(".tmp")
+        temporary_path.write_text(base64.b64encode(encrypted).decode("ascii"), encoding="ascii")
+        temporary_path.replace(self.path)
+
     def diagnostics(self, keys: tuple[str, ...]) -> dict[str, str]:
         values = self._read_all()
         return {key: mask_secret(values.get(key)) for key in keys}
