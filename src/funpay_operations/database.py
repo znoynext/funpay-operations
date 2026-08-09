@@ -257,6 +257,33 @@ MIGRATIONS: tuple[Migration, ...] = (
             )""",
         ),
     ),
+    (
+        8,
+        "trusted seller matching engine",
+        (
+            """CREATE TABLE IF NOT EXISTS trusted_seller_profiles (
+                seller_id TEXT PRIMARY KEY,
+                nickname TEXT NOT NULL,
+                family TEXT NOT NULL CHECK (family IN ('mythic_plus', 'delves')),
+                enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+                verification_state TEXT NOT NULL CHECK (verification_state IN ('pending', 'verified', 'rejected')),
+                last_checked_state TEXT NOT NULL CHECK (last_checked_state IN ('never', 'current', 'changed', 'error')),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS competitor_service_mappings (
+                seller_id TEXT NOT NULL REFERENCES trusted_seller_profiles(seller_id) ON DELETE CASCADE,
+                competitor_lot_id TEXT NOT NULL,
+                service_code TEXT NOT NULL,
+                mapping_state TEXT NOT NULL CHECK (mapping_state IN ('confirmed', 'revalidation_required')),
+                material_snapshot_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (seller_id, competitor_lot_id)
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_competitor_service_mappings_code ON competitor_service_mappings(service_code, mapping_state)",
+        ),
+    ),
 )
 
 
