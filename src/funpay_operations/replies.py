@@ -16,12 +16,14 @@ class FunPayReplyRouter:
     def __init__(
         self, allowed_user_ids: tuple[int, ...], links: TelegramMessageLinkRepository,
         replies: ReplyRepository, funpay: FunPayReplyClient, *, clock: Callable[[], float] = time.time,
+        outbound_allowed: Callable[[str], bool] | None = None,
     ) -> None:
         self._allowed = frozenset(allowed_user_ids)
         self._links = links
         self._replies = replies
         self._funpay = funpay
         self._clock = clock
+        self._outbound_allowed = outbound_allowed or (lambda _: True)
 
     def handle(self, update: TelegramUpdate) -> CommandReply | None:
         if update.user_id not in self._allowed or update.chat_id != update.user_id:
@@ -67,6 +69,9 @@ class FunPayReplyRouter:
         return None
 
     def _deliver(self, attempt: ReplyAttempt) -> CommandReply:
+        if not self._outbound_allowed("outbound_reply"):
+            self._replies.mark(attempt.attempt_id, "failed")
+            return CommandReply("Emergency stop blocks outbound replies.")
         try:
             self._funpay.send_reply(
                 attempt.target.external_dialog_id, attempt.target.buyer_nickname, attempt.body, attempt.idempotency_key

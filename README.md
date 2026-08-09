@@ -208,6 +208,20 @@ directory; `storage.backup_retention_count` (default `7`) bounds retention and
 `storage.backup_interval_seconds` (default `3600`) controls the maintenance
 task. Application logs use the existing rotating local handler.
 
+## Telegram control layer
+
+`TelegramControlRouter` is ready for the future primary Telegram interface but
+is tested only with `MockTelegramApi` and `MockControlService`. Its main menu
+contains Status, Mythic+, Delves, Messages, price check/update, update+raise,
+trusted sellers, lots, rollback, pause/resume, and Emergency stop. Mass lot
+sync, mass price update, rollback, update+raise, and lot disabling require an
+inline confirm/cancel callback before reaching the service layer.
+
+Emergency stop is persisted locally and blocks lot writes, price writes, raise,
+auto-reply, automated outbound messages, and Telegram-to-FunPay replies. It
+does not stop incoming notification polling. Allowlisted private-chat checks
+remain mandatory for every control action.
+
 ## Seasonal data and description previews
 
 Public seasonal metadata lives under `seasonal_data/v1/` and includes only
