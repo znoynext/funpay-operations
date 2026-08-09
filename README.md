@@ -72,6 +72,37 @@ deterministic: `mplus_k{level}_{region}_{format}_x{size}` and
 missing `x1`, duplicate package sizes or choices, unsupported formats/modes,
 condition names that conflict with variants, and duplicate stable codes.
 
+## Local lot synchronization plan
+
+`funpay-operations lots plan-sync` is a local dry-run planner. It reads the
+local Own Lot Registry and local Service Catalog only; it does not load a
+FunPay session, contact FunPay or Telegram, or call a lot-write method.
+
+```powershell
+funpay-operations lots plan-sync
+```
+
+It produces an in-memory `LotSyncPlan` with one action per stable service code.
+An action records the current and desired safe summaries, changed fields,
+required write capabilities, safety status, and a reason. Decisions are
+`already_correct`, `create_required`, `update_required`, `disable_required`,
+`enable_required`, `ambiguous`, `blocked`, or `unsupported`.
+
+Lot identity is never inferred from title, description, or price. It needs a
+local confirmed mapping in `lot_service_mappings` between the stable service
+code and an Own Lot Registry ID. Multiple confirmed candidates are marked
+`ambiguous`, so the planner neither picks one nor proposes a duplicate. A
+missing mapping is the only case that can require creation, and only when every
+existing lot already has a different confirmed mapping; an unmapped existing
+lot makes the proposed creation `ambiguous`. Repeating the same dry-run plan
+yields locally skipped actions and still makes no write calls.
+
+Diffs cover title, description, price-policy placeholder, enabled state,
+editor form fields, category/node, and price-affecting service conditions.
+The price value is deliberately only a placeholder at this stage. A seasonal
+description marked unconfirmed is blocked; it can proceed only when local
+configuration supplies an explicit safe-neutral template.
+
 ## Seasonal data and description previews
 
 Public seasonal metadata lives under `seasonal_data/v1/` and includes only

@@ -246,6 +246,17 @@ MIGRATIONS: tuple[Migration, ...] = (
             "CREATE INDEX IF NOT EXISTS idx_service_catalog_family ON service_catalog(family, enabled)",
         ),
     ),
+    (
+        7,
+        "confirmed lot service mappings",
+        (
+            """CREATE TABLE IF NOT EXISTS lot_service_mappings (
+                external_lot_id TEXT PRIMARY KEY REFERENCES own_lot_registry(external_id) ON DELETE CASCADE,
+                service_code TEXT NOT NULL UNIQUE,
+                confirmed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )""",
+        ),
+    ),
 )
 
 
