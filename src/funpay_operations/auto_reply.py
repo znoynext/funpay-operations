@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Callable
 
 from .funpay import FunPayError, FunPayMessage, FunPayReplyClient, RealOperationsDisabled
 from .repositories import AutoReplyRepository, ReplyTarget, StoredFunPayMessage, TaskStateRepository
@@ -16,13 +17,14 @@ class AutoReplyService:
 
     def __init__(
         self, replies: FunPayReplyClient, repository: AutoReplyRepository, states: TaskStateRepository,
-        logger: logging.Logger, *, default_enabled: bool,
+        logger: logging.Logger, *, default_enabled: bool, outbound_allowed: Callable[[str], bool] | None = None,
     ) -> None:
         self._replies = replies
         self._repository = repository
         self._states = states
         self._logger = logger
         self._default_enabled = default_enabled
+        self._outbound_allowed = outbound_allowed or (lambda _: True)
 
     def is_initialized(self) -> bool:
         return self._states.load("funpay_auto_reply_bootstrap") is not None
@@ -37,7 +39,8 @@ class AutoReplyService:
         return state[0] == "enabled"
 
     def maybe_reply(self, message: FunPayMessage, stored: StoredFunPayMessage, local_dialog_id: int) -> None:
-        if message.direction != "incoming" or not self.is_enabled() or not message.buyer_nickname or not message.sent_at:
+        if (message.direction != "incoming" or not self.is_enabled() or not self._outbound_allowed("auto_reply")
+                or not message.buyer_nickname or not message.sent_at):
             return
         attempt = self._repository.claim(
             stored.local_id, ReplyTarget(local_dialog_id, message.dialog_id, message.buyer_nickname), message.sent_at

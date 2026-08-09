@@ -14,6 +14,7 @@ from .replies import FunPayReplyRouter
 from .repositories import AutoReplyRepository, DialogRepository, ReplyRepository, TaskStateRepository, TelegramMessageLinkRepository
 from .setup_wizard import SecretStore
 from .telegram import build_telegram_bot
+from .telegram_control import CompositeTelegramRouter, EmergencyStopGate, MockControlService, TelegramControlRouter
 from .tasks import BackgroundRunner
 from .runtime import SingletonProcessLock
 
@@ -32,15 +33,19 @@ class Application:
         )
         self.funpay_replies = build_reply_client(settings, self.funpay)
         self.telegram = build_telegram_bot(settings, secret_store, self.task_states, self.logger)
+        self.emergency_stop = EmergencyStopGate(self.task_states)
         self.telegram.set_interaction_router(
-            FunPayReplyRouter(
-                settings.allowed_telegram_user_ids, TelegramMessageLinkRepository(self.database),
-                ReplyRepository(self.database), self.funpay_replies,
+            CompositeTelegramRouter(
+                TelegramControlRouter(settings.allowed_telegram_user_ids, self.task_states, MockControlService(), self.emergency_stop),
+                FunPayReplyRouter(
+                    settings.allowed_telegram_user_ids, TelegramMessageLinkRepository(self.database),
+                    ReplyRepository(self.database), self.funpay_replies, outbound_allowed=self.emergency_stop.permits,
+                ),
             )
         )
         self.auto_replies = AutoReplyService(
             self.funpay_replies, AutoReplyRepository(self.database), self.task_states, self.logger,
-            default_enabled=settings.funpay_auto_reply_enabled,
+            default_enabled=settings.funpay_auto_reply_enabled, outbound_allowed=self.emergency_stop.permits,
         )
         self.notifications = (
             FunPayMessageNotifier(
