@@ -281,7 +281,7 @@ class WindowsInfraTests(unittest.TestCase):
     def test_wizard_catalog_preview_and_minimum_price_are_local_only(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             paths = resolve_windows_paths(Path(temporary_directory))
-            answers = iter(("m", "10", "10", "selfplay", "1,3", "y", "Mythic+ +10", "1000", "y"))
+            answers = iter(("y", "10", "10", "selfplay", "1,3", "y", "Mythic+ +10", "1000", "y"))
             output = io.StringIO()
             self.assertEqual(run_setup_wizard(paths, output, input_fn=lambda _prompt: next(answers)), 0)
             self.assertIn("Предпросмотр: будет сохранено услуг: 2", output.getvalue())

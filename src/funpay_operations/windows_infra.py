@@ -736,37 +736,23 @@ def _packages_input(input_fn: Callable[[str], str], prompt: str) -> list[int]:
 
 
 def _catalog_definition_from_wizard(input_fn: Callable[[str], str]) -> dict[str, object] | None:
-    selected = _choice(input_fn, "Что будем продавать? [m] Mythic+  [d] Delves  [b] оба  [Enter] позже: ")
+    selected = _choice(input_fn, "Настроить услуги World of Warcraft Mythic+? [y] да  [Enter] позже: ")
     if not selected:
         return None
-    if selected not in {"m", "d", "b"}:
+    if selected not in {"y", "yes", "д", "да"}:
         raise WindowsSetupError("unknown catalog selection")
 
     definition: dict[str, object] = {"version": 1}
-    if selected in {"m", "b"}:
-        minimum = _positive_input(input_fn, "Mythic+: минимальный ключ: ")
-        maximum = _positive_input(input_fn, "Mythic+: максимальный ключ: ")
-        definition["mythic_plus"] = {
-            "min_key_level": minimum, "max_key_level": maximum, "regions": ["eu"],
-            "service_formats": _choices_input(input_fn, "Mythic+: формат (selfplay,pilot): ", {"selfplay", "pilot"}),
-            "package_sizes": _packages_input(input_fn, "Mythic+: пакеты (например 1,3): "),
-            "price_conditions": {}, "enabled": False, "desired_state": "disabled",
-            "template_reference": "not_selected", "description_profile": "safe_neutral",
-            "price_policy_reference": "not_selected",
-        }
-    if selected in {"d", "b"}:
-        minimum = _positive_input(input_fn, "Delves: минимальный tier: ")
-        maximum = _positive_input(input_fn, "Delves: максимальный tier: ")
-        definition["delves"] = {
-            "min_tier": minimum, "max_tier": maximum,
-            "modes": _choices_input(input_fn, "Delves: режимы (normal,bountiful): ", {"normal", "bountiful"}),
-            "regions": ["eu"],
-            "service_formats": _choices_input(input_fn, "Delves: формат (selfplay,pilot): ", {"selfplay", "pilot"}),
-            "package_sizes": _packages_input(input_fn, "Delves: пакеты (например 1,2): "),
-            "price_conditions": {}, "enabled": False, "desired_state": "disabled",
-            "template_reference": "not_selected", "description_profile": "safe_neutral",
-            "price_policy_reference": "not_selected",
-        }
+    minimum = _positive_input(input_fn, "Mythic+: минимальный ключ: ")
+    maximum = _positive_input(input_fn, "Mythic+: максимальный ключ: ")
+    definition["mythic_plus"] = {
+        "min_key_level": minimum, "max_key_level": maximum, "regions": ["eu"],
+        "service_formats": _choices_input(input_fn, "Mythic+: формат (selfplay,pilot): ", {"selfplay", "pilot"}),
+        "package_sizes": _packages_input(input_fn, "Mythic+: пакеты (например 1,3): "),
+        "price_conditions": {}, "enabled": False, "desired_state": "disabled",
+        "template_reference": "not_selected", "description_profile": "safe_neutral",
+        "price_policy_reference": "not_selected",
+    }
     return definition
 
 

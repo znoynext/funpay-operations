@@ -38,16 +38,24 @@ class BackgroundRunner:
         telegram: TelegramLongPollingBot | None = None, notifications: FunPayMessageNotifier | None = None,
         session_guard: FunPaySessionGuard | None = None, session_expired_callback: Callable[[], None] | None = None,
         telegram_enabled: bool | None = None,
+        session_validation: Callable[[], object] | None = None,
+        read_model_refresh: Callable[[], object] | None = None,
     ) -> None:
         self.settings, self.database, self.logger = settings, database, logger
         self.funpay, self.telegram, self.notifications = funpay, telegram, notifications
         self.session_guard, self.session_expired_callback = session_guard, session_expired_callback
         self.telegram_enabled = settings.telegram_enabled if telegram_enabled is None else telegram_enabled
+        self.session_validation, self.read_model_refresh = session_validation, read_model_refresh
         self.runtime_states = TaskStateRepository(database)
         self._shutdown_requested = asyncio.Event()
         disabled = DisabledAdapter()
+        recovery_actions = {
+            "validate-external-sessions": self._validate_external_sessions,
+            "catch-up-messages": self._poll_messages,
+            "refresh-market": self._refresh_read_model,
+        }
         recovery = RecoveryCoordinator(tuple(
-            RecoveryStep(name, disabled.run) for name in RecoveryCoordinator.ORDER
+            RecoveryStep(name, recovery_actions.get(name, disabled.run)) for name in RecoveryCoordinator.ORDER
         ), logger)
         self.sleep_resume = SleepResumeHandler(recovery)
         self.network_recovery = WindowsNetworkRecoveryHandler(recovery)
@@ -75,6 +83,8 @@ class BackgroundRunner:
         self.runtime_states.save("background_runtime", "running")
         self.runtime_states.save("background_control", "running")
         try:
+            await self._validate_external_sessions()
+            await self._refresh_read_model()
             if once:
                 await self.run_cycle()
                 return
@@ -126,6 +136,18 @@ class BackgroundRunner:
         if not self.telegram_enabled or self.telegram is None or self.telegram.is_stopped:
             return TaskDisposition.DISABLED
         await asyncio.to_thread(self.telegram.poll_once)
+        return None
+
+    async def _validate_external_sessions(self) -> TaskDisposition | None:
+        if self.session_validation is None:
+            return TaskDisposition.DISABLED
+        await asyncio.to_thread(self.session_validation)
+        return None
+
+    async def _refresh_read_model(self) -> TaskDisposition | None:
+        if self.read_model_refresh is None:
+            return TaskDisposition.DISABLED
+        await asyncio.to_thread(self.read_model_refresh)
         return None
 
     async def _maintain_storage(self) -> None:

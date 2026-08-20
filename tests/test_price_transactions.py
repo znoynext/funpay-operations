@@ -38,14 +38,13 @@ class PriceTransactionIntegrationTests(unittest.TestCase):
         self.temporary_directory.cleanup()
 
     def test_execute_fetches_snapshots_writes_only_differences_and_verifies(self) -> None:
-        adapter = MockOwnLotPriceAdapter({"mplus-lot": 11_000, "delve-lot": 11_000})
-        coordinator, source, snapshots = _coordinator(self.database, adapter, include_delves=True)
+        adapter = MockOwnLotPriceAdapter({"mplus-lot": 11_000})
+        coordinator, source, snapshots = _coordinator(self.database, adapter)
         result = coordinator.run(TransactionMode.EXECUTE)
-        mythic, delves = result.batches
+        (mythic,) = result.batches
         self.assertEqual(source.calls, 1)
         self.assertEqual(mythic.status, FamilyBatchStatus.COMPLETED)
-        self.assertEqual(delves.status, FamilyBatchStatus.COMPLETED)
-        self.assertEqual(adapter.write_calls, [("mplus-lot", 9_900), ("delve-lot", 9_900)])
+        self.assertEqual(adapter.write_calls, [("mplus-lot", 9_900)])
         self.assertEqual(adapter.prices["mplus-lot"], 9_900)
         self.assertIsNotNone(snapshots.latest_completed(SellerFamily.MYTHIC_PLUS))
         self.assertTrue(all(item.successful for item in mythic.lot_results))
@@ -84,16 +83,15 @@ class PriceTransactionIntegrationTests(unittest.TestCase):
         self.assertFalse(batch.lot_results[0].successful)
         self.assertEqual(snapshots.unsafe_reason(SellerFamily.MYTHIC_PLUS), "write rejected")
 
-    def test_failed_mythic_batch_does_not_block_independent_delves_batch(self) -> None:
-        adapter = MockOwnLotPriceAdapter(
-            {"mplus-lot": 11_000, "delve-lot": 11_000}, stale_write_attempts={"mplus-lot": 2}
+    def test_unconfirmed_own_identity_blocks_price_write(self) -> None:
+        adapter = MockOwnLotPriceAdapter({"mplus-lot": 11_000})
+        coordinator, _, _ = _coordinator(self.database, adapter)
+        coordinator.lots = tuple(
+            ManagedPriceLot(item.lot_id, item.family, item.price_state, False) for item in coordinator.lots
         )
-        coordinator, _, snapshots = _coordinator(self.database, adapter, include_delves=True)
-        mythic, delves = coordinator.run(TransactionMode.EXECUTE).batches
-        self.assertEqual(mythic.status, FamilyBatchStatus.FAILED)
-        self.assertEqual(delves.status, FamilyBatchStatus.COMPLETED)
-        self.assertIsNotNone(snapshots.unsafe_reason(SellerFamily.MYTHIC_PLUS))
-        self.assertIsNone(snapshots.unsafe_reason(SellerFamily.DELVES))
+        batch = coordinator.run(TransactionMode.EXECUTE).batches[0]
+        self.assertEqual(batch.status, FamilyBatchStatus.BLOCKED)
+        self.assertEqual(adapter.write_calls, [])
 
     def test_dry_run_and_check_never_call_mock_writer(self) -> None:
         adapter = MockOwnLotPriceAdapter({"mplus-lot": 11_000})
@@ -136,18 +134,12 @@ class PriceTransactionIntegrationTests(unittest.TestCase):
             )
 
 
-def _coordinator(database: Database, adapter: MockOwnLotPriceAdapter, *, include_delves: bool = False):
-    lots = [ManagedPriceLot("mplus-lot", SellerFamily.MYTHIC_PLUS, _price_state("mplus"))]
+def _coordinator(database: Database, adapter: MockOwnLotPriceAdapter):
+    lots = [ManagedPriceLot("mplus-lot", SellerFamily.MYTHIC_PLUS, _price_state("mplus"), True)]
     records = list(_records("mplus", "a", "b"))
     sellers = [_seller("a", SellerFamily.MYTHIC_PLUS), _seller("b", SellerFamily.MYTHIC_PLUS)]
     mappings = [_mapping("a", "mplus"), _mapping("b", "mplus")]
     policies = {"mplus": PricePolicy(hard_floor=1_000, price_step_minor=100, currency="RUB")}
-    if include_delves:
-        lots.append(ManagedPriceLot("delve-lot", SellerFamily.DELVES, _price_state("delve")))
-        records.extend(_records("delve", "c", "d"))
-        sellers.extend((_seller("c", SellerFamily.DELVES), _seller("d", SellerFamily.DELVES)))
-        mappings.extend((_mapping("c", "delve"), _mapping("d", "delve")))
-        policies["delve"] = PricePolicy(hard_floor=1_000, price_step_minor=100, currency="RUB")
     source = MockCompetitorObservationAdapter(tuple(records))
     snapshots = PriceSnapshotRepository(database)
     return (

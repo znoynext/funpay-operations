@@ -52,7 +52,8 @@ class LotSyncPlannerTests(unittest.TestCase):
     def test_unconfirmed_existing_lot_blocks_creation_to_prevent_duplicates(self) -> None:
         unconfirmed = _current()
         unconfirmed = type(unconfirmed)(
-            lot_id=unconfirmed.lot_id, confirmed_service_code=None, title=unconfirmed.title,
+            lot_id=unconfirmed.lot_id, confirmed_service_code=None, managed_service_family=None,
+            identity_confirmed=False, title=unconfirmed.title,
             description=unconfirmed.description, price_minor=unconfirmed.price_minor, is_active=unconfirmed.is_active,
             category_node_id=unconfirmed.category_node_id, form_fields=unconfirmed.form_fields,
             service_conditions=unconfirmed.service_conditions,
@@ -64,6 +65,19 @@ class LotSyncPlannerTests(unittest.TestCase):
     def test_duplicate_candidates_are_ambiguous_instead_of_creating_or_updating(self) -> None:
         duplicate = _current(lot_id="lot-2")
         action = LotSyncPlanner(MockLotWriteClient()).plan((self.desired,), (_current(), duplicate)).actions[0]
+        self.assertEqual(action.decision, LotSyncDecision.AMBIGUOUS)
+        self.assertEqual(action.capability_requirements, ())
+
+    def test_non_mythic_lot_is_never_planned_for_mutation(self) -> None:
+        other = _current()
+        other = type(other)(
+            lot_id=other.lot_id, confirmed_service_code=self.service.stable_code,
+            managed_service_family=None, identity_confirmed=False, title="Other WoW service",
+            description=other.description, price_minor=other.price_minor, is_active=other.is_active,
+            category_node_id=other.category_node_id, form_fields=other.form_fields,
+            service_conditions=other.service_conditions,
+        )
+        action = LotSyncPlanner(MockLotWriteClient()).plan((self.desired,), (other,)).actions[0]
         self.assertEqual(action.decision, LotSyncDecision.AMBIGUOUS)
         self.assertEqual(action.capability_requirements, ())
 
@@ -155,16 +169,18 @@ def _service(code: str = "mplus_k10_eu_selfplay_x1") -> CatalogService:
 
 def _desired(service: CatalogService):
     return desired_from_catalog(
-        service, title="M+ 10", category_node_id="node-1", form_fields={"amount": "1"},
+        service, title="Mythic+ +10 EU self-play x1", category_node_id="node-1", form_fields={"amount": "1"},
         description=DescriptionTarget("Verified description", DescriptionConfirmation.CONFIRMED),
     )
 
 
-def _current(*, lot_id: str = "lot-1", category_node_id: str = "node-1", title: str = "M+ 10",
+def _current(*, lot_id: str = "lot-1", category_node_id: str = "node-1", title: str = "Mythic+ +10 EU self-play x1",
              description: str = "Verified description", form_fields: dict[str, str] | None = None):
     from funpay_operations.lot_sync import CurrentLotState
     return CurrentLotState(
-        lot_id=lot_id, confirmed_service_code="mplus_k10_eu_selfplay_x1", title=title, description=description,
+        lot_id=lot_id, confirmed_service_code="mplus_k10_eu_selfplay_x1",
+        managed_service_family=CatalogFamily.MYTHIC_PLUS, identity_confirmed=True,
+        title=title, description=description,
         price_minor=100, is_active=True, category_node_id=category_node_id, form_fields=form_fields or {"amount": "1"},
         service_conditions={"timed": "yes"},
     )
@@ -172,7 +188,7 @@ def _current(*, lot_id: str = "lot-1", category_node_id: str = "node-1", title: 
 
 def _detail() -> FunPayLotDetails:
     return FunPayLotDetails(
-        lot_id="lot-1", title="M+ 10", price_minor=100, currency="RUB", seller_id="seller-1",
+        lot_id="lot-1", title="Mythic+ +10 EU self-play x1", price_minor=100, currency="RUB", seller_id="seller-1",
         category_node_id="node-1", is_active=True, description="Verified description", short_description=None,
         location=None, is_deleted=False, editor_fields={"amount": "1"}, editor_options={}, omitted_field_names=(),
     )

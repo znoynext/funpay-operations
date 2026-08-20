@@ -5,13 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "funpay-operations"
 version = "0.1.0"
-description = "Windows background application scaffold for controlled FunPay operations."
+description = "FunPay Operations for World of Warcraft Mythic+."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "fpx-engine==0.7.4",
   "PyYAML>=6.0.2,<7",
-  "python-dotenv>=1.0.1,<2",
+  "python-dotenv>=1.2.2,<2",
+  "idna>=3.15,<4",
 ]
 
 [project.optional-dependencies]

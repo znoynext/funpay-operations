@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 
 import yaml
 
-from .services import DelveService, MythicPlusService, Region
+from .services import MythicPlusService, Region
 
 
 _MAX_YAML_BYTES = 64 * 1024
@@ -66,8 +66,8 @@ class SeasonalData:
             raise SeasonalDataError(f"unsupported schema_version: {schema_version}")
         data_version = _positive_int(payload.get("data_version"), "data_version")
         service = payload.get("service")
-        if service not in {"mythic_plus", "delves"}:
-            raise SeasonalDataError("service must be mythic_plus or delves")
+        if service != "mythic_plus":
+            raise SeasonalDataError("service must be mythic_plus")
         season = payload.get("season")
         if not isinstance(season, str) or not _SEASON_ID.fullmatch(season):
             raise SeasonalDataError("season must be a stable lowercase identifier")
@@ -174,20 +174,6 @@ class DescriptionGenerator:
                 "Случайный предмет не гарантируется."
             )
         return DescriptionPreview(service.code, data.season, data.data_version, text)
-
-    def delves(self, service: DelveService, data: SeasonalData) -> DescriptionPreview:
-        data.require_confirmed_for("delves", service.region)
-        rewards = _specific_value(data.reward_item_levels, "tier", service.tier, "reward item level")
-        crests = _specific_value(data.crests, "tier", service.tier, "crests")
-        mode = "Bountiful" if service.bountiful else "обычное"
-        text = (
-            f"Delve уровня {service.tier}, {mode}, формат: {service.service_format.value}. "
-            f"Актуальная награда для этого tier: ilvl {rewards}. "
-            f"Гребни для этого tier: {crests}. "
-            "Случайный предмет не гарантируется."
-        )
-        return DescriptionPreview(service.code, data.season, data.data_version, text)
-
 
 def _positive_int(value: Any, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:

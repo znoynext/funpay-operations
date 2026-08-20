@@ -37,6 +37,7 @@ class ManagedPriceLot:
     lot_id: str
     family: SellerFamily
     price_state: OwnLotPriceState
+    identity_confirmed: bool
 
 
 @dataclass(frozen=True)
@@ -201,6 +202,8 @@ class PriceUpdateCoordinator:
     ) -> None:
         if not observation_adapter.mock_only or not own_price_adapter.mock_only:
             raise ValueError("PriceUpdateCoordinator accepts mock adapters only in this release")
+        if any(item.family is not SellerFamily.MYTHIC_PLUS for item in lots):
+            raise ValueError("only Mythic+ lots can enter the price transaction coordinator")
         self.observation_adapter, self.own_price_adapter = observation_adapter, own_price_adapter
         self.safety_engine, self.snapshots = safety_engine, snapshots
         self.lots, self.sellers, self.mappings, self.history, self.policies = lots, sellers, mappings, history, policies
@@ -213,6 +216,8 @@ class PriceUpdateCoordinator:
         return PriceTransactionResult(mode, len(observations), batches)
 
     def rollback(self, family: SellerFamily, mode: TransactionMode) -> FamilyPriceBatchResult:
+        if family is not SellerFamily.MYTHIC_PLUS:
+            raise ValueError("only Mythic+ rollback is supported")
         if mode not in {TransactionMode.ROLLBACK_PREVIEW, TransactionMode.ROLLBACK}:
             raise ValueError("rollback requires rollback_preview or rollback")
         snapshot = self.snapshots.latest_completed(family)
@@ -236,7 +241,11 @@ class PriceUpdateCoordinator:
         return FamilyPriceBatchResult(family, FamilyBatchStatus.ROLLED_BACK, (), outcomes, "rollback verified")
 
     def _run_family(self, family: SellerFamily, observations: tuple[PriceObservationRecord, ...], mode: TransactionMode) -> FamilyPriceBatchResult:
-        lots = tuple(item for item in self.lots if item.family is family)
+        if any(item.family is family and not item.identity_confirmed for item in self.lots):
+            return FamilyPriceBatchResult(
+                family, FamilyBatchStatus.BLOCKED, (), (), "own Mythic+ lot identity is not confirmed"
+            )
+        lots = tuple(item for item in self.lots if item.family is family and item.identity_confirmed)
         if not lots:
             return FamilyPriceBatchResult(family, FamilyBatchStatus.CHECKED, (), (), "no managed lots")
         decisions, batch_safety = self.safety_engine.batch_preview(
@@ -315,7 +324,7 @@ def run_price_transaction_command(action: str, *, database: Database, output: Te
     )
     if action == "check":
         result = coordinator.run(TransactionMode.CHECK)
-        print(f"prices check: observations={result.fetched_observations} mythic_plus=checked delves=checked", file=output)
+        print(f"prices check: observations={result.fetched_observations} mythic_plus=checked", file=output)
         return 0
     if action == "dry-run-update":
         result = coordinator.run(TransactionMode.DRY_RUN)
@@ -323,6 +332,6 @@ def run_price_transaction_command(action: str, *, database: Database, output: Te
         return 0
     if action == "rollback-preview":
         results = tuple(coordinator.rollback(family, TransactionMode.ROLLBACK_PREVIEW) for family in SellerFamily)
-        print(f"prices rollback-preview: mythic_plus={results[0].status.value} delves={results[1].status.value} writes=0", file=output)
+        print(f"prices rollback-preview: mythic_plus={results[0].status.value} writes=0", file=output)
         return 0
     raise ValueError("unsupported price transaction action")

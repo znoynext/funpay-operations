@@ -44,6 +44,7 @@ jobs:
           & (Join-Path $app 'funpay-operations-cli.exe') diagnostics
           & (Join-Path $app 'funpay-operations.exe') --background --once
           & (Join-Path $app 'funpay-operations-setup.exe') --smoke
+          & (Join-Path $app 'funpay-operations-setup.exe') --gui-runtime-smoke
           & (Join-Path $app 'funpay-operations-auth.exe') --runtime-status
           if ($LASTEXITCODE -notin @(0, 2)) { throw "WebView2 helper status check failed: $LASTEXITCODE" }
           & (Join-Path $app 'funpay-operations-cli.exe') uninstall

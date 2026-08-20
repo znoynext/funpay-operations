@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Iterator
 
@@ -341,6 +342,40 @@ MIGRATIONS: tuple[Migration, ...] = (
             )""",
         ),
     ),
+    (
+        12,
+        "production read-only lot controls",
+        (
+            """CREATE TABLE IF NOT EXISTS lot_control_settings (
+                external_lot_id TEXT PRIMARY KEY REFERENCES own_lot_registry(external_id) ON DELETE CASCADE,
+                pricing_mode TEXT NOT NULL DEFAULT 'check_only' CHECK (
+                    pricing_mode IN ('automatic', 'fixed_price', 'paused', 'check_only')
+                ),
+                fixed_price_minor INTEGER CHECK (fixed_price_minor IS NULL OR fixed_price_minor > 0),
+                minimum_price_minor INTEGER CHECK (minimum_price_minor IS NULL OR minimum_price_minor > 0),
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CHECK (
+                    (pricing_mode = 'fixed_price' AND fixed_price_minor IS NOT NULL)
+                    OR (pricing_mode != 'fixed_price' AND fixed_price_minor IS NULL)
+                )
+            )""",
+            """CREATE TABLE IF NOT EXISTS read_only_price_observations (
+                observation_id TEXT PRIMARY KEY,
+                seller_id TEXT NOT NULL,
+                competitor_lot_id TEXT NOT NULL,
+                service_code TEXT NOT NULL,
+                price_minor INTEGER NOT NULL CHECK (price_minor > 0),
+                currency TEXT NOT NULL,
+                lot_identity_hash TEXT NOT NULL,
+                structural_signature TEXT NOT NULL,
+                sequence INTEGER NOT NULL CHECK (sequence > 0),
+                observed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(seller_id, competitor_lot_id, sequence)
+            )""",
+            """CREATE INDEX IF NOT EXISTS idx_read_only_observations_service
+            ON read_only_price_observations(service_code, observed_at)""",
+        ),
+    ),
 )
 
 
@@ -377,7 +412,13 @@ class Database:
 
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        needs_backup = self.path.exists() and self.path.stat().st_size > 0 and self._has_pending_migrations()
+        if needs_backup:
+            self.check_integrity()
+            self._backup_before_migration()
         self.apply_migrations()
+        if needs_backup:
+            self.check_integrity()
 
     def apply_migrations(self) -> None:
         """Apply each migration once; a failure rolls back the incomplete version."""
@@ -406,3 +447,43 @@ class Database:
     def applied_migrations(self) -> tuple[int, ...]:
         with self.session() as connection:
             return tuple(row["version"] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version"))
+
+    def check_integrity(self) -> None:
+        connection = self.connect()
+        try:
+            result = connection.execute("PRAGMA integrity_check").fetchone()
+        finally:
+            connection.close()
+        if result is None or result[0] != "ok":
+            raise MigrationError("database integrity check failed")
+
+    def _has_pending_migrations(self) -> bool:
+        connection = self.connect()
+        try:
+            table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
+            ).fetchone()
+            if table is None:
+                return True
+            applied = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}
+        finally:
+            connection.close()
+        return any(version not in applied for version, _, _ in MIGRATIONS)
+
+    def _backup_before_migration(self) -> Path:
+        backup_root = (
+            self.path.parent.parent / "backups"
+            if self.path.parent.name.casefold() == "data"
+            else self.path.parent / "backups"
+        )
+        backup_root.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+        target = backup_root / f"{self.path.stem}.pre-migration.{stamp}.sqlite3"
+        source = self.connect()
+        destination = sqlite3.connect(target)
+        try:
+            source.backup(destination)
+        finally:
+            destination.close()
+            source.close()
+        return target

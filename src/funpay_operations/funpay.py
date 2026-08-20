@@ -127,6 +127,8 @@ class FunPayClient(Protocol):
 
     def get_seller_lots(self, seller_id: str) -> tuple[FunPayLot, ...]: ...
 
+    def get_seller_lot_details(self, seller_id: str) -> tuple[FunPayLotDetails, ...]: ...
+
     def get_dialogs(self) -> tuple[FunPayDialog, ...]: ...
 
     def get_new_messages(self, after_message_id: str | None = None) -> tuple[FunPayMessage, ...]: ...
@@ -168,7 +170,14 @@ class NativeFunPayClient:
         currency: str,
         allow_replies: bool,
         min_request_interval_seconds: float = 0,
+        max_attempts: int = 3,
+        retry_initial_seconds: float = 1.0,
+        retry_max_seconds: float = 30.0,
+        circuit_failure_threshold: int = 3,
+        circuit_open_seconds: float = 60.0,
         tools_factory: FunPayToolsFactory | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         self._session_provider = session_provider
         self._currency = _required_text(currency, "currency")
@@ -176,7 +185,21 @@ class NativeFunPayClient:
         if min_request_interval_seconds < 0:
             raise ValueError("min_request_interval_seconds must not be negative")
         self._min_request_interval_seconds = min_request_interval_seconds
+        if max_attempts < 1 or circuit_failure_threshold < 1:
+            raise ValueError("request attempts and circuit threshold must be positive")
+        if retry_initial_seconds < 0 or retry_max_seconds < retry_initial_seconds or circuit_open_seconds <= 0:
+            raise ValueError("retry and circuit intervals are invalid")
+        self._max_attempts = max_attempts
+        self._retry_initial_seconds = retry_initial_seconds
+        self._retry_max_seconds = retry_max_seconds
+        self._circuit_failure_threshold = circuit_failure_threshold
+        self._circuit_open_seconds = circuit_open_seconds
+        self._monotonic = monotonic
+        self._sleeper = sleeper
         self._last_operation_at: float | None = None
+        self._last_wire_at: float | None = None
+        self._consecutive_failures = 0
+        self._circuit_open_until: float | None = None
         self._tools_factory = tools_factory or _fpx_tools_factory
         self._call_lock = threading.Lock()
 
@@ -200,7 +223,7 @@ class NativeFunPayClient:
 
     def get_profile(self) -> FunPayProfile:
         async def action(tools: Any) -> FunPayProfile:
-            user_data = await tools.account.profile.get_user_data()
+            user_data = await self._paced(tools.account.profile.get_user_data())
             return FunPayProfile(
                 account_id=_required_text(getattr(user_data, "user_id", None), "profile.account_id"),
                 username=_required_text(getattr(tools.account.data, "username", None), "profile.username"),
@@ -211,9 +234,9 @@ class NativeFunPayClient:
 
     def get_own_lots(self) -> tuple[FunPayLot, ...]:
         async def action(tools: Any) -> tuple[FunPayLot, ...]:
-            user_data = await tools.account.profile.get_user_data()
+            user_data = await self._paced(tools.account.profile.get_user_data())
             seller_id = _required_text(getattr(user_data, "user_id", None), "profile.account_id")
-            profile = await tools.account.profile.profile(seller_id)
+            profile = await self._paced(tools.account.profile.profile(seller_id))
             return await self._normalize_lots(tools, profile, seller_id)
 
         return self._run(action)
@@ -226,19 +249,19 @@ class NativeFunPayClient:
         """
 
         async def action(tools: Any) -> tuple[FunPayLotDetails, ...]:
-            user_data = await tools.account.profile.get_user_data()
+            user_data = await self._paced(tools.account.profile.get_user_data())
             seller_id = _required_text(getattr(user_data, "user_id", None), "profile.account_id")
-            profile = await tools.account.profile.profile(seller_id)
+            profile = await self._paced(tools.account.profile.profile(seller_id))
             result: list[FunPayLotDetails] = []
             node_options: dict[str, dict[str, tuple[tuple[str, str], ...]]] = {}
             for lot in getattr(profile, "lots", ()):
                 lot_id = _required_text(getattr(lot, "id", None), "lot.id")
-                lot_info = await tools.account.lot.get_lot_info(lot_id)
-                editor = await tools.account.lot._get_lot_editor_details(lot_id)
+                lot_info = await self._paced(tools.account.lot.get_lot_info(lot_id))
+                editor = await self._paced(tools.account.lot._get_lot_editor_details(lot_id))
                 fields, omitted = _safe_editor_fields(getattr(editor, "fields", None))
                 category_node_id = _optional_text(getattr(editor, "node_id", None))
                 if category_node_id is not None and category_node_id not in node_options:
-                    node_editor = await tools.account.lot.get_node_editor_data(category_node_id)
+                    node_editor = await self._paced(tools.account.lot.get_node_editor_data(category_node_id))
                     node_options[category_node_id] = _safe_node_options(getattr(node_editor, "fields", None))
                 result.append(FunPayLotDetails(
                     lot_id=lot_id,
@@ -264,19 +287,48 @@ class NativeFunPayClient:
         normalized_seller_id = _required_text(seller_id, "seller_id")
 
         async def action(tools: Any) -> tuple[FunPayLot, ...]:
-            profile = await tools.account.profile.profile(normalized_seller_id)
+            profile = await self._paced(tools.account.profile.profile(normalized_seller_id))
             return await self._normalize_lots(tools, profile, normalized_seller_id)
+
+        return self._run(action)
+
+    def get_seller_lot_details(self, seller_id: str) -> tuple[FunPayLotDetails, ...]:
+        """Read public competitor lot text; never request its private editor form."""
+
+        normalized_seller_id = _required_text(seller_id, "seller_id")
+
+        async def action(tools: Any) -> tuple[FunPayLotDetails, ...]:
+            profile = await self._paced(tools.account.profile.profile(normalized_seller_id))
+            category_ids = tuple(
+                _required_text(value, "profile.category_id") for value in getattr(profile, "category_ids", ())
+            )
+            # fpx exposes categories only at profile level.  Attribute a node
+            # to a lot only when the profile has exactly one possible node.
+            category_node_id = category_ids[0] if len(set(category_ids)) == 1 else None
+            result: list[FunPayLotDetails] = []
+            for lot in getattr(profile, "lots", ()):
+                lot_id = _required_text(getattr(lot, "id", None), "lot.id")
+                info = await self._paced(tools.account.lot.get_lot_info(lot_id))
+                result.append(FunPayLotDetails(
+                    lot_id=lot_id, title=_required_text(getattr(lot, "name", None), "lot.title"),
+                    price_minor=_price_minor(getattr(info, "price", None)), currency=self._currency,
+                    seller_id=normalized_seller_id, category_node_id=category_node_id, is_active=None,
+                    description=_optional_text(getattr(info, "description", None)),
+                    short_description=_optional_text(getattr(info, "short_desc", None)), location=None,
+                    is_deleted=None, editor_fields={}, editor_options={}, omitted_field_names=(),
+                ))
+            return tuple(result)
 
         return self._run(action)
 
     def get_dialogs(self) -> tuple[FunPayDialog, ...]:
         async def action(tools: Any) -> tuple[FunPayDialog, ...]:
-            chats = await _chats_or_empty(tools)
+            chats = await _chats_or_empty(tools, self._paced)
             own_id = _optional_text(getattr(tools.account.data, "user_id", None))
             result: list[FunPayDialog] = []
             for chat in chats:
                 dialog_id = _required_text(getattr(chat, "id", None), "chat.id")
-                chat_data = await tools.account.chat.get_chat_data(dialog_id)
+                chat_data = await self._paced(tools.account.chat.get_chat_data(dialog_id))
                 result.append(FunPayDialog(
                     dialog_id=dialog_id,
                     counterparty_id=_counterparty_id(getattr(chat_data, "node_name", None), own_id),
@@ -291,16 +343,16 @@ class NativeFunPayClient:
         cursors, legacy_cursor = _dialog_cursors(after_message_id)
 
         async def action(tools: Any) -> tuple[FunPayMessage, ...]:
-            user_data = await tools.account.profile.get_user_data()
+            user_data = await self._paced(tools.account.profile.get_user_data())
             own_id = _required_text(getattr(user_data, "user_id", None), "profile.account_id")
             own_name = _required_text(getattr(tools.account.data, "username", None), "profile.username")
-            chats = await _chats_or_empty(tools)
+            chats = await _chats_or_empty(tools, self._paced)
             events: list[tuple[int, FunPayMessage]] = []
             seen: set[str] = set()
             for chat in chats:
                 dialog_id = _required_text(getattr(chat, "id", None), "chat.id")
                 dialog_cursor = cursors.get(dialog_id, legacy_cursor)
-                chat_data = await tools.account.chat.get_chat_data(dialog_id, dialog_cursor)
+                chat_data = await self._paced(tools.account.chat.get_chat_data(dialog_id, dialog_cursor))
                 counterparty_id = _counterparty_id(getattr(chat_data, "node_name", None), own_id)
                 for message in getattr(chat_data, "last_messages", ()):
                     event = _normalize_message(
@@ -322,8 +374,8 @@ class NativeFunPayClient:
         normalized_lot_id = _required_text(lot_id, "lot_id")
 
         async def action(tools: Any) -> FunPayBumpMetadata | None:
-            user_data = await tools.account.profile.get_user_data()
-            profile = await tools.account.profile.profile(user_data.user_id)
+            user_data = await self._paced(tools.account.profile.get_user_data())
+            profile = await self._paced(tools.account.profile.profile(user_data.user_id))
             lot_ids = {_required_text(getattr(lot, "id", None), "lot.id") for lot in getattr(profile, "lots", ())}
             if normalized_lot_id not in lot_ids:
                 return None
@@ -349,7 +401,7 @@ class NativeFunPayClient:
         _required_text(idempotency_key, "idempotency_key")
 
         async def action(tools: Any) -> None:
-            await tools.account.chat.send_message(normalized_dialog_id, normalized_body)
+            await self._paced(tools.account.chat.send_message(normalized_dialog_id, normalized_body))
 
         self._run(action)
 
@@ -357,7 +409,7 @@ class NativeFunPayClient:
         result: list[FunPayLot] = []
         for lot in getattr(profile, "lots", ()):
             lot_id = _required_text(getattr(lot, "id", None), "lot.id")
-            lot_info = await tools.account.lot.get_lot_info(lot_id)
+            lot_info = await self._paced(tools.account.lot.get_lot_info(lot_id))
             result.append(FunPayLot(
                 lot_id=lot_id,
                 title=_required_text(getattr(lot, "name", None), "lot.title"),
@@ -384,18 +436,47 @@ class NativeFunPayClient:
             pass
         else:
             raise RuntimeError("NativeFunPayClient must be called from a worker thread")
-        try:
-            with self._call_lock:
+        with self._call_lock:
+            now = self._monotonic()
+            if self._circuit_open_until is not None and now < self._circuit_open_until:
+                raise FunPayNetworkUnavailable("FunPay reads are temporarily paused by the local circuit breaker")
+            self._circuit_open_until = None
+            for attempt in range(self._max_attempts):
                 if self._last_operation_at is not None:
-                    delay = self._min_request_interval_seconds - (time.monotonic() - self._last_operation_at)
+                    delay = self._min_request_interval_seconds - (self._monotonic() - self._last_operation_at)
                     if delay > 0:
-                        time.sleep(delay)
-                self._last_operation_at = time.monotonic()
-                return asyncio.run(invoke())
-        except FunPayError:
-            raise
-        except BaseException as error:
-            raise _map_library_error(error) from error
+                        self._sleeper(delay)
+                self._last_operation_at = self._monotonic()
+                try:
+                    result = asyncio.run(invoke())
+                except FunPayError as error:
+                    mapped = error
+                except BaseException as error:
+                    mapped = _map_library_error(error)
+                else:
+                    self._consecutive_failures = 0
+                    return result
+                if isinstance(mapped, FunPaySessionExpired):
+                    raise mapped
+                self._consecutive_failures += 1
+                if self._consecutive_failures >= self._circuit_failure_threshold:
+                    self._circuit_open_until = self._monotonic() + self._circuit_open_seconds
+                if not isinstance(mapped, FunPayNetworkUnavailable) or attempt + 1 >= self._max_attempts:
+                    raise mapped
+                backoff = min(self._retry_initial_seconds * (2 ** attempt), self._retry_max_seconds)
+                if backoff:
+                    self._sleeper(backoff)
+            raise FunPayNetworkUnavailable("FunPay read retry budget was exhausted")  # pragma: no cover
+
+    async def _paced(self, operation: Awaitable[T]) -> T:
+        """Apply the conservative request interval to every fpx wire call."""
+
+        if self._last_wire_at is not None:
+            delay = self._min_request_interval_seconds - (self._monotonic() - self._last_wire_at)
+            if delay > 0:
+                await asyncio.sleep(delay)
+        self._last_wire_at = self._monotonic()
+        return await operation
 
 
 @dataclass
@@ -407,6 +488,7 @@ class MockFunPayClient:
     own_lots: tuple[FunPayLot, ...] = ()
     own_lot_details: tuple[FunPayLotDetails, ...] = ()
     seller_lots: Mapping[str, tuple[FunPayLot, ...]] = field(default_factory=dict)
+    seller_lot_details: Mapping[str, tuple[FunPayLotDetails, ...]] = field(default_factory=dict)
     dialogs: tuple[FunPayDialog, ...] = ()
     messages: tuple[FunPayMessage, ...] = ()
     bump_metadata: Mapping[str, FunPayBumpMetadata] = field(default_factory=dict)
@@ -431,6 +513,10 @@ class MockFunPayClient:
     def get_seller_lots(self, seller_id: str) -> tuple[FunPayLot, ...]:
         self.calls.append("get_seller_lots")
         return self.seller_lots.get(seller_id, ())
+
+    def get_seller_lot_details(self, seller_id: str) -> tuple[FunPayLotDetails, ...]:
+        self.calls.append("get_seller_lot_details")
+        return self.seller_lot_details.get(seller_id, ())
 
     def get_dialogs(self) -> tuple[FunPayDialog, ...]:
         self.calls.append("get_dialogs")
@@ -463,8 +549,13 @@ def build_read_client(settings: Any, local_secret_store: Any) -> NativeFunPayCli
     return NativeFunPayClient(
         session_from_local_store(local_secret_store, settings.funpay_credential_key),
         currency=settings.default_currency,
-        allow_replies=settings.operations_enabled and settings.operation_mode == "live",
+        # Production read clients never carry a mutation capability.  A future
+        # live release must compose a separately reviewed adapter explicitly.
+        allow_replies=False,
         min_request_interval_seconds=settings.funpay_min_request_interval_seconds,
+        max_attempts=settings.funpay_retry_attempts,
+        retry_initial_seconds=settings.reconnect_initial_seconds,
+        retry_max_seconds=settings.reconnect_max_seconds,
         tools_factory=lambda key, seal: _fpx_tools_factory(
             key, seal, timeout_seconds=settings.funpay_request_timeout_seconds,
         ),
@@ -511,9 +602,12 @@ def _session_from_value(value: str | None) -> FunPaySession:
     return FunPaySession(golden_key, golden_seal)
 
 
-async def _chats_or_empty(tools: Any) -> tuple[Any, ...]:
+async def _chats_or_empty(
+    tools: Any, paced: Callable[[Awaitable[Any]], Awaitable[Any]] | None = None,
+) -> tuple[Any, ...]:
     try:
-        chats = await tools.account.chat.get_chats()
+        operation = tools.account.chat.get_chats()
+        chats = await paced(operation) if paced is not None else await operation
     except BaseException as error:
         if error.__class__.__name__ == "FpxNullDataError":
             return ()
@@ -669,11 +763,11 @@ def _safe_node_options(value: Any) -> dict[str, tuple[tuple[str, str], ...]]:
     if not isinstance(value, (list, tuple)):
         raise FunPayProtocolError("lot node editor fields must be a sequence")
     result: dict[str, tuple[tuple[str, str], ...]] = {}
-    for field in value:
-        name = _required_text(getattr(field, "key", None), "lot node editor field name")
+    for lot_field in value:
+        name = _required_text(getattr(lot_field, "key", None), "lot node editor field name")
         if _is_sensitive_field_name(name.lower()):
             continue
-        raw_options = getattr(field, "options", None)
+        raw_options = getattr(lot_field, "options", None)
         if raw_options is None:
             result[name] = ()
             continue
@@ -697,6 +791,8 @@ def _map_library_error(error: BaseException) -> FunPayError:
     message = str(error).lower()
     if "auth" in name or any(marker in message for marker in ("сесси", "cookie", "авториз", "invalid cookie")):
         return FunPaySessionExpired("FunPay session was rejected or expired")
-    if any(marker in name or marker in message for marker in ("timeout", "connect", "network", "requesterror", "429")):
+    if any(marker in name or marker in message for marker in (
+        "timeout", "connect", "network", "requesterror", "429", "403", "too many requests", "forbidden",
+    )):
         return FunPayNetworkUnavailable("FunPay is unavailable after controlled retries")
     return FunPayProtocolError("FunPay response could not be normalized")

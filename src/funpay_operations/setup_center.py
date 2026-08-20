@@ -160,7 +160,7 @@ class SetupCenterWindow:
         from tkinter import ttk
 
         self.root, self.controller, self.tk, self.ttk = root, controller, tk, ttk
-        root.title("FunPay Operations")
+        root.title("FunPay Operations for World of Warcraft Mythic+")
         root.minsize(540, 470)
         root.protocol("WM_DELETE_WINDOW", root.destroy)
         self._status = tk.StringVar()
@@ -168,7 +168,9 @@ class SetupCenterWindow:
         frame.grid(sticky="nsew")
         root.columnconfigure(0, weight=1)
         root.rowconfigure(0, weight=1)
-        ttk.Label(frame, text="FunPay Operations", font=("Segoe UI", 18, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            frame, text="FunPay Operations for World of Warcraft Mythic+", font=("Segoe UI", 18, "bold")
+        ).grid(row=0, column=0, sticky="w")
         ttk.Label(frame, textvariable=self._status, justify="left").grid(row=1, column=0, sticky="w", pady=(14, 14))
         buttons = (
             ("🔐 Подключить FunPay", self._open_funpay),
@@ -323,7 +325,13 @@ class SetupCenterWindow:
         frame = self.ttk.Frame(window, padding=16)
         frame.grid(sticky="nsew")
         username = f"@{candidate.username}" if candidate.username else "без username"
-        self.ttk.Label(frame, text=f"Найден Telegram аккаунт:\n{username}\nID: {candidate.masked_id}\n\nРазрешить управление FunPay Operations этому аккаунту?").grid(row=0, column=0, columnspan=2, sticky="w")
+        self.ttk.Label(
+            frame,
+            text=(
+                f"Найден Telegram аккаунт:\n{username}\nID: {candidate.masked_id}\n\n"
+                "Разрешить управление FunPay Operations for World of Warcraft Mythic+ этому аккаунту?"
+            ),
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
 
         def accept() -> None:
             result = self.controller.confirm_owner(candidate.user_id)
@@ -340,12 +348,9 @@ class SetupCenterWindow:
         window.title("Услуги")
         frame = self.ttk.Frame(window, padding=16)
         frame.grid(sticky="nsew")
-        mythic, delves = self.tk.BooleanVar(value=True), self.tk.BooleanVar(value=True)
-        min_key, max_key, min_tier, max_tier, packages = (self.tk.StringVar(value=value) for value in ("10", "10", "1", "1", "1"))
-        self.ttk.Label(frame, text="Что будем продавать?", font=("Segoe UI", 14, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
-        self.ttk.Checkbutton(frame, text="Mythic+", variable=mythic).grid(row=1, column=0, sticky="w")
-        self.ttk.Checkbutton(frame, text="Delves", variable=delves).grid(row=1, column=1, sticky="w")
-        for row, label, variable in ((2, "Mythic+: минимальный ключ", min_key), (3, "Mythic+: максимальный ключ", max_key), (4, "Delves: минимальный tier", min_tier), (5, "Delves: максимальный tier", max_tier), (6, "Пакеты (например 1,3)", packages)):
+        min_key, max_key, packages = (self.tk.StringVar(value=value) for value in ("10", "10", "1"))
+        self.ttk.Label(frame, text="World of Warcraft Mythic+", font=("Segoe UI", 14, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
+        for row, label, variable in ((1, "Минимальный ключ", min_key), (2, "Максимальный ключ", max_key), (3, "Пакеты (например 1,3)", packages)):
             self.ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=2)
             self.ttk.Entry(frame, textvariable=variable).grid(row=row, column=1, sticky="ew", pady=2)
 
@@ -354,10 +359,7 @@ class SetupCenterWindow:
                 package_sizes = [int(value.strip()) for value in packages.get().split(",") if value.strip()]
                 definition: dict[str, object] = {"version": 1}
                 common = {"regions": ["eu"], "service_formats": ["selfplay"], "package_sizes": package_sizes, "price_conditions": {}, "enabled": False, "desired_state": "disabled", "template_reference": "not_selected", "description_profile": "safe_neutral", "price_policy_reference": "not_selected"}
-                if mythic.get():
-                    definition["mythic_plus"] = {**common, "min_key_level": int(min_key.get()), "max_key_level": int(max_key.get())}
-                if delves.get():
-                    definition["delves"] = {**common, "min_tier": int(min_tier.get()), "max_tier": int(max_tier.get()), "modes": ["normal", "bountiful"]}
+                definition["mythic_plus"] = {**common, "min_key_level": int(min_key.get()), "max_key_level": int(max_key.get())}
             except ValueError:
                 self._message("Услуги", "Проверьте числовые параметры и пакеты.", error=True)
                 return
@@ -367,7 +369,7 @@ class SetupCenterWindow:
                 window.destroy()
                 self.refresh()
 
-        self.ttk.Button(frame, text="Предпросмотр и сохранить", command=save).grid(row=7, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        self.ttk.Button(frame, text="Предпросмотр и сохранить", command=save).grid(row=4, column=0, columnspan=2, sticky="ew", pady=(10, 0))
 
     def _open_minimum_price(self) -> None:
         window = self.tk.Toplevel(self.root)
@@ -413,8 +415,15 @@ class SetupCenterWindow:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Open the local FunPay Operations Setup Center.")
+    parser = argparse.ArgumentParser(
+        description="Open the local FunPay Operations for World of Warcraft Mythic+ Setup Center."
+    )
     parser.add_argument("--smoke", action="store_true", help="load the safe GUI model without showing a window")
+    parser.add_argument(
+        "--gui-runtime-smoke",
+        action="store_true",
+        help="initialize the packaged Tcl/Tk runtime without showing a window",
+    )
     parser.add_argument("--funpay-auth", action="store_true", help="open only the local user-driven FunPay authorization flow")
     args = parser.parse_args(argv)
     from .windows_infra import resolve_windows_paths
@@ -424,6 +433,11 @@ def main(argv: list[str] | None = None) -> int:
         controller.statuses()
         return 0
     import tkinter as tk
+
+    if args.gui_runtime_smoke:
+        interpreter = tk.Tcl()
+        interpreter.call("info", "patchlevel")
+        return 0
 
     root = tk.Tk()
     window = SetupCenterWindow(root, controller)

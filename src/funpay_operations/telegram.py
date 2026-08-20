@@ -321,7 +321,8 @@ class MockTelegramApi:
 
 
 def build_telegram_bot(settings: Any, local_secret_store: Any, states: TaskStateStore,
-                       logger: logging.Logger, *, allowed_user_ids: tuple[int, ...] | None = None) -> TelegramLongPollingBot:
+                       logger: logging.Logger, *, allowed_user_ids: tuple[int, ...] | None = None,
+                       auto_reply_available: bool | None = None) -> TelegramLongPollingBot:
     """Compose the bot without reading the DPAPI token until polling starts."""
 
     def token_provider() -> str | None:
@@ -330,7 +331,7 @@ def build_telegram_bot(settings: Any, local_secret_store: Any, states: TaskState
     api = TelegramHttpApi(token_provider, timeout_seconds=settings.telegram_long_poll_timeout_seconds + 10)
     handler = TelegramCommandHandler(
         allowed_user_ids if allowed_user_ids is not None else settings.allowed_telegram_user_ids, states, logger,
-        auto_reply_available=settings.operations_enabled,
+        auto_reply_available=(settings.operations_enabled if auto_reply_available is None else auto_reply_available),
     )
     return TelegramLongPollingBot(api, handler, states, logger, timeout_seconds=settings.telegram_long_poll_timeout_seconds)
 

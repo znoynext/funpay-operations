@@ -19,7 +19,6 @@ from .service_catalog import CatalogService
 
 class SellerFamily(StrEnum):
     MYTHIC_PLUS = "mythic_plus"
-    DELVES = "delves"
 
 
 class SellerVerificationState(StrEnum):
@@ -68,8 +67,6 @@ class CompetitorLotSnapshot:
     category: str | None
     region: str | None
     key_level: int | None
-    tier: int | None
-    bountiful: bool | None
     service_format: str | None
     package_size: int | None
     substantial_conditions: Mapping[str, str] | None
@@ -85,9 +82,7 @@ class ServiceMatchSpec:
     family: SellerFamily
     category: str
     region: str
-    key_level: int | None
-    tier: int | None
-    bountiful: bool | None
+    key_level: int
     service_format: str
     package_size: int
     substantial_conditions: Mapping[str, str]
@@ -101,18 +96,9 @@ class ServiceMatchSpec:
         region = _required_string(variant.get("region"), "catalog region")
         service_format = _required_string(variant.get("service_format"), "catalog service_format")
         package_size = _required_int(variant.get("package_size"), "catalog package_size")
-        if family is SellerFamily.MYTHIC_PLUS:
-            return cls(
-                service.stable_code, family, category.strip(), region,
-                _required_int(variant.get("key_level"), "catalog key_level"), None, None,
-                service_format, package_size, _conditions(service.price_conditions),
-            )
-        mode = _required_string(variant.get("mode"), "catalog mode")
-        if mode not in {"normal", "bountiful"}:
-            raise ValueError("catalog Delves mode must be normal or bountiful")
         return cls(
-            service.stable_code, family, category.strip(), region, None,
-            _required_int(variant.get("tier"), "catalog tier"), mode == "bountiful",
+            service.stable_code, family, category.strip(), region,
+            _required_int(variant.get("key_level"), "catalog key_level"),
             service_format, package_size, _conditions(service.price_conditions),
         )
 
@@ -139,8 +125,8 @@ class TrustedSellerRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
 
-    def add_mock_seller(
-        self, seller_id: str, nickname: str, family: SellerFamily,
+    def add_seller(
+        self, seller_id: str, nickname: str,
         *, verification_state: SellerVerificationState = SellerVerificationState.PENDING,
     ) -> TrustedSeller:
         seller_id, nickname = _required_string(seller_id, "seller_id"), _required_string(nickname, "nickname")
@@ -152,21 +138,34 @@ class TrustedSellerRepository:
                 ON CONFLICT(seller_id) DO UPDATE SET nickname = excluded.nickname, family = excluded.family,
                     enabled = 1, verification_state = excluded.verification_state,
                     updated_at = CURRENT_TIMESTAMP""",
-                (seller_id, nickname, family.value, verification_state.value),
+                (seller_id, nickname, SellerFamily.MYTHIC_PLUS.value, verification_state.value),
             )
         seller = self.get(seller_id)
         if seller is None:  # pragma: no cover - SQLite failure guard
             raise RuntimeError("trusted seller could not be retrieved")
         return seller
 
+    def add_mock_seller(
+        self, seller_id: str, nickname: str,
+        *, verification_state: SellerVerificationState = SellerVerificationState.PENDING,
+    ) -> TrustedSeller:
+        """Backward-compatible test helper; production uses :meth:`add_seller`."""
+
+        return self.add_seller(seller_id, nickname, verification_state=verification_state)
+
     def get(self, seller_id: str) -> TrustedSeller | None:
         with self.database.session() as connection:
-            row = connection.execute("SELECT * FROM trusted_seller_profiles WHERE seller_id = ?", (seller_id,)).fetchone()
+            row = connection.execute(
+                "SELECT * FROM trusted_seller_profiles WHERE seller_id = ? AND family = 'mythic_plus'",
+                (seller_id,),
+            ).fetchone()
         return _seller_from_row(row)
 
     def list(self) -> tuple[TrustedSeller, ...]:
         with self.database.session() as connection:
-            rows = connection.execute("SELECT * FROM trusted_seller_profiles ORDER BY seller_id").fetchall()
+            rows = connection.execute(
+                "SELECT * FROM trusted_seller_profiles WHERE family = 'mythic_plus' ORDER BY seller_id"
+            ).fetchall()
         return tuple(_seller_from_row(row) for row in rows if row is not None)
 
     def disable_seller(self, seller_id: str) -> bool:
@@ -174,12 +173,16 @@ class TrustedSellerRepository:
 
     def remove_seller(self, seller_id: str) -> bool:
         with self.database.session() as connection:
-            return connection.execute("DELETE FROM trusted_seller_profiles WHERE seller_id = ?", (seller_id,)).rowcount == 1
+            return connection.execute(
+                "DELETE FROM trusted_seller_profiles WHERE seller_id = ? AND family = 'mythic_plus'",
+                (seller_id,),
+            ).rowcount == 1
 
     def set_last_checked_state(self, seller_id: str, state: SellerLastCheckedState) -> None:
         with self.database.session() as connection:
             if connection.execute(
-                "UPDATE trusted_seller_profiles SET last_checked_state = ?, updated_at = CURRENT_TIMESTAMP WHERE seller_id = ?",
+                "UPDATE trusted_seller_profiles SET last_checked_state = ?, updated_at = CURRENT_TIMESTAMP "
+                "WHERE seller_id = ? AND family = 'mythic_plus'",
                 (state.value, seller_id),
             ).rowcount != 1:
                 raise KeyError("trusted seller does not exist")
@@ -187,7 +190,8 @@ class TrustedSellerRepository:
     def _update_enabled(self, seller_id: str, enabled: bool) -> bool:
         with self.database.session() as connection:
             return connection.execute(
-                "UPDATE trusted_seller_profiles SET enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE seller_id = ?",
+                "UPDATE trusted_seller_profiles SET enabled = ?, updated_at = CURRENT_TIMESTAMP "
+                "WHERE seller_id = ? AND family = 'mythic_plus'",
                 (int(enabled), seller_id),
             ).rowcount == 1
 
@@ -201,7 +205,10 @@ class CompetitorLotMappingRepository:
     def get(self, seller_id: str, competitor_lot_id: str) -> CompetitorLotMapping | None:
         with self.database.session() as connection:
             row = connection.execute(
-                "SELECT * FROM competitor_service_mappings WHERE seller_id = ? AND competitor_lot_id = ?",
+                """SELECT mappings.* FROM competitor_service_mappings mappings
+                JOIN service_catalog catalog ON catalog.stable_code = mappings.service_code
+                WHERE mappings.seller_id = ? AND mappings.competitor_lot_id = ?
+                  AND catalog.family = 'mythic_plus'""",
                 (seller_id, competitor_lot_id),
             ).fetchone()
         return _mapping_from_row(row)
@@ -209,7 +216,11 @@ class CompetitorLotMappingRepository:
     def list_for_seller(self, seller_id: str) -> tuple[CompetitorLotMapping, ...]:
         with self.database.session() as connection:
             rows = connection.execute(
-                "SELECT * FROM competitor_service_mappings WHERE seller_id = ? ORDER BY competitor_lot_id", (seller_id,)
+                """SELECT mappings.* FROM competitor_service_mappings mappings
+                JOIN service_catalog catalog ON catalog.stable_code = mappings.service_code
+                WHERE mappings.seller_id = ? AND catalog.family = 'mythic_plus'
+                ORDER BY mappings.competitor_lot_id""",
+                (seller_id,),
             ).fetchall()
         return tuple(_mapping_from_row(row) for row in rows if row is not None)
 
@@ -240,7 +251,15 @@ class CompetitorLotMappingRepository:
             _required_string(snapshot.seller_id, "seller_id"), _required_string(snapshot.lot_id, "lot_id"),
             _required_string(service_code, "service_code"),
         )
+        if snapshot.family is not SellerFamily.MYTHIC_PLUS:
+            raise ValueError("only an exact Mythic+ competitor lot can be mapped")
         with self.database.session() as connection:
+            service = connection.execute(
+                "SELECT 1 FROM service_catalog WHERE stable_code = ? AND family = 'mythic_plus'",
+                (service_code,),
+            ).fetchone()
+            if service is None:
+                raise ValueError("mapping target must be an active Mythic+ service code")
             connection.execute(
                 """INSERT INTO competitor_service_mappings
                 (seller_id, competitor_lot_id, service_code, mapping_state, material_snapshot_hash)
@@ -279,12 +298,10 @@ class ManualSellerConfirmationAPI:
         self.sellers, self.mappings, self.matcher = sellers, mappings, matcher or SellerMatchingEngine()
 
     def add_mock_seller(
-        self, seller_id: str, nickname: str, family: SellerFamily,
+        self, seller_id: str, nickname: str,
         *, verification_state: SellerVerificationState = SellerVerificationState.PENDING,
     ) -> TrustedSeller:
-        return self.sellers.add_mock_seller(
-            seller_id, nickname, family, verification_state=verification_state
-        )
+        return self.sellers.add_seller(seller_id, nickname, verification_state=verification_state)
 
     def disable_seller(self, seller_id: str) -> bool:
         return self.sellers.disable_seller(seller_id)
@@ -293,11 +310,11 @@ class ManualSellerConfirmationAPI:
         return self.sellers.remove_seller(seller_id)
 
     def confirm_match(self, snapshot: CompetitorLotSnapshot, services: tuple[ServiceMatchSpec, ...]) -> CompetitorLotMapping:
-        seller = self._eligible_seller(snapshot)
+        self._eligible_seller(snapshot)
         assessment = self.matcher.match(snapshot, services)
         if assessment.result is not MatchResult.EXACT or assessment.service_code is None:
             raise ValueError(f"manual confirmation requires exact match, got {assessment.result.value}")
-        if seller.family is not snapshot.family:
+        if snapshot.family is not SellerFamily.MYTHIC_PLUS:
             raise ValueError("snapshot family does not match trusted seller family")
         mapping = self.mappings.confirm_exact(snapshot, assessment.service_code)
         self.sellers.set_last_checked_state(snapshot.seller_id, SellerLastCheckedState.CURRENT)
@@ -329,10 +346,7 @@ def _missing_match_data(snapshot: CompetitorLotSnapshot) -> tuple[str, ...]:
         ("service_format", snapshot.service_format), ("package_size", snapshot.package_size),
         ("substantial_conditions", snapshot.substantial_conditions),
     ]
-    if snapshot.family is SellerFamily.MYTHIC_PLUS:
-        fields.append(("key_level", snapshot.key_level))
-    elif snapshot.family is SellerFamily.DELVES:
-        fields.extend((("tier", snapshot.tier), ("bountiful", snapshot.bountiful)))
+    fields.append(("key_level", snapshot.key_level))
     return tuple(name for name, value in fields if value is None or value == "")
 
 
@@ -341,7 +355,7 @@ def _exactly_matches(snapshot: CompetitorLotSnapshot, service: ServiceMatchSpec)
         snapshot.family is service.family and snapshot.category == service.category and snapshot.region == service.region
         and snapshot.service_format == service.service_format and snapshot.package_size == service.package_size
         and _conditions(snapshot.substantial_conditions) == _conditions(service.substantial_conditions)
-        and snapshot.key_level == service.key_level and snapshot.tier == service.tier and snapshot.bountiful is service.bountiful
+        and snapshot.key_level == service.key_level
     )
 
 

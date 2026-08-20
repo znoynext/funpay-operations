@@ -42,6 +42,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Installed diagnostics failed.' }
 if ($LASTEXITCODE -ne 0) { throw 'Installed background smoke cycle failed.' }
 & $installedSetup --smoke
 if ($LASTEXITCODE -ne 0) { throw 'Installed Setup Center smoke test failed.' }
+& $installedSetup --gui-runtime-smoke
+if ($LASTEXITCODE -ne 0) { throw 'Installed Setup Center GUI runtime smoke test failed.' }
 & $installedAuth --runtime-status
 if ($LASTEXITCODE -ne 0) { throw 'Installed WebView2 Runtime check failed.' }
 

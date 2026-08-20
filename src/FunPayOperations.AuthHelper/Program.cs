@@ -82,7 +82,7 @@ internal static class Program
         {
             _profile = profile;
             _smoke = smoke;
-            Text = "FunPay Operations — Авторизация FunPay";
+            Text = "FunPay Operations for World of Warcraft Mythic+ — Авторизация FunPay";
             Width = 980;
             Height = 720;
             MinimizeBox = true;

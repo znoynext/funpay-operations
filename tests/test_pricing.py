@@ -138,14 +138,18 @@ class PricingEngineTests(unittest.TestCase):
         self.assertEqual(len(decision.excluded_observations), 5)
 
     def test_batch_preview_is_sorted_and_keeps_services_isolated(self) -> None:
-        another = _own(service_code="delve_t8_bountiful_eu_selfplay_x1")
+        another = _own(service_code="mplus_k12_eu_selfplay_x1")
         decisions = self.engine.batch_preview(
             (another, self.own), sellers=(_seller(),), mappings=(_mapping(),), observations=(_observation(10_000),),
             policies={self.own.service_code: self.policy, another.service_code: self.policy},
         )
-        self.assertEqual([item.service_code for item in decisions], [another.service_code, self.own.service_code])
-        self.assertEqual(decisions[0].action, PriceAction.KEEP_CURRENT_PRICE)
-        self.assertEqual(decisions[1].action, PriceAction.UPDATE_PRICE)
+        self.assertEqual(
+            [item.service_code for item in decisions],
+            sorted((another.service_code, self.own.service_code)),
+        )
+        by_code = {item.service_code: item for item in decisions}
+        self.assertEqual(by_code[another.service_code].action, PriceAction.KEEP_CURRENT_PRICE)
+        self.assertEqual(by_code[self.own.service_code].action, PriceAction.UPDATE_PRICE)
 
     def test_duplicate_mapping_or_observation_is_not_silently_selected(self) -> None:
         with self.assertRaisesRegex(ValueError, "duplicate competitor mappings"):

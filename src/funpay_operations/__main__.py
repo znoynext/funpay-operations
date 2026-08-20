@@ -21,7 +21,7 @@ from .lot_sync import run_plan_sync
 from .lot_writes import MockLotWriteClient
 from .price_transactions import run_price_transaction_command
 from .seasonal import DescriptionGenerator, SeasonalDataError, load_seasonal_data
-from .services import DelveService, MythicPlusService, Region, ServiceFormat
+from .services import MythicPlusService, Region, ServiceFormat
 from .setup_wizard import SecretStore
 from .smoke import run_smoke_test
 from .windows_infra import (
@@ -41,7 +41,7 @@ def main() -> int:
             pass
     if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    parser = argparse.ArgumentParser(description="Run the FunPay operations background scaffold.")
+    parser = argparse.ArgumentParser(description="FunPay Operations for World of Warcraft Mythic+.")
     parser.add_argument("command", nargs="?", choices=["smoke-test", "discover-lots", "catalog", "lots", "prices", "diagnostics", "first-run", "setup", "install", "uninstall", "install-autostart", "remove-autostart", "show-autostart-status", "repair-autostart"], help="run a local command")
     parser.add_argument("catalog_action", nargs="?", choices=["preview", "validate", "init-example", "plan-sync", "check", "dry-run-update", "rollback-preview"])
     parser.add_argument("--config", type=Path, help="YAML configuration path (takes priority over .env)")
@@ -54,17 +54,11 @@ def main() -> int:
     )
     parser.add_argument("--preview-seasonal-data", type=Path, help="Render a local seasonal description preview from YAML")
     parser.add_argument("--preview-key-level", type=int, help="Mythic+ key level for --preview-seasonal-data")
-    parser.add_argument("--preview-delve-tier", type=int, help="Delve tier for --preview-seasonal-data")
     parser.add_argument("--preview-region", choices=[region.value for region in Region], default="eu")
     parser.add_argument("--preview-format", choices=[format_.value for format_ in ServiceFormat], default="selfplay")
-    parser.add_argument("--preview-bountiful", action="store_true", help="Use Bountiful mode for a Delve preview")
     parser.add_argument(
         "--select-mythic-template", action="store_true",
         help="prompt locally to select an already mapped Mythic+ lot as an exemplar",
-    )
-    parser.add_argument(
-        "--select-delves-template", action="store_true",
-        help="prompt locally to select an already mapped Delves lot as an exemplar",
     )
     parser.add_argument(
         "--catalog-file", type=Path, default=Path("data") / "service_catalog.json",
@@ -144,13 +138,10 @@ def main() -> int:
             region = Region(args.preview_region)
             service_format = ServiceFormat(args.preview_format)
             generator = DescriptionGenerator()
-            if args.preview_key_level is not None and args.preview_delve_tier is None:
+            if args.preview_key_level is not None:
                 print(generator.mythic_plus(MythicPlusService(args.preview_key_level, region, service_format), data).text)
                 return 0
-            if args.preview_delve_tier is not None and args.preview_key_level is None:
-                print(generator.delves(DelveService(args.preview_delve_tier, args.preview_bountiful, region, service_format), data).text)
-                return 0
-            parser.error("choose exactly one of --preview-key-level or --preview-delve-tier with --preview-seasonal-data")
+            parser.error("--preview-key-level is required with --preview-seasonal-data")
         except SeasonalDataError as error:
             parser.error(f"seasonal preview unavailable: {error}")
 
@@ -179,22 +170,19 @@ def main() -> int:
     if args.command == "smoke-test":
         settings = load_settings(config_path=config_path, env_path=args.env_file)
         client = build_read_client(settings, SecretStore(settings.data_directory / "secrets.dpapi"))
-        return run_smoke_test(client, output=sys.stdout)
+        return run_smoke_test(client, output=sys.stdout, database=Database(settings.database_path))
     if args.command == "discover-lots":
         settings = load_settings(config_path=config_path, env_path=args.env_file)
         database = Database(settings.database_path)
         database.initialize()
         client = build_read_client(settings, SecretStore(settings.data_directory / "secrets.dpapi"))
         mythic_template_id = None
-        delves_template_id = None
         try:
             if args.select_mythic_template:
                 mythic_template_id = getpass.getpass("FunPay Mythic+ lot ID for local template (input hidden): ")
-            if args.select_delves_template:
-                delves_template_id = getpass.getpass("FunPay Delves lot ID for local template (input hidden): ")
             return run_discovery(
                 client, OwnLotRegistryRepository(database), output=sys.stdout,
-                mythic_template_id=mythic_template_id, delves_template_id=delves_template_id,
+                mythic_template_id=mythic_template_id,
             )
         finally:
             client.close()

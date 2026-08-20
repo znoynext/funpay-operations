@@ -10,6 +10,7 @@ from funpay_operations.funpay import FunPayLotDetails, MockFunPayClient
 from funpay_operations.lot_discovery import (
     LotDiscovery,
     OwnLotRegistryRepository,
+    RegisteredLot,
     classify_wow_lot,
     run_discovery,
 )
@@ -35,14 +36,13 @@ class LotDiscoveryTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
 
-    def test_normalizes_complete_mythic_plus_and_delves_without_guessing(self) -> None:
+    def test_normalizes_complete_mythic_plus_and_leaves_other_lots_unmanaged(self) -> None:
         mythic = classify_wow_lot(lot("m1", "Mythic+ +10 EU self-play x1", "Own key service"))
         self.assertEqual((mythic.kind, mythic.mapping_state), ("mythic_plus", "mapped"))
         self.assertEqual((mythic.key_level, mythic.region, mythic.service_format, mythic.package_size), (10, "eu", "selfplay", 1))
 
-        delve = classify_wow_lot(lot("d1", "Delves Tier 8 Bountiful EU Pilot x1", "Terms"))
-        self.assertEqual((delve.kind, delve.mapping_state), ("delves", "mapped"))
-        self.assertEqual((delve.delve_tier, delve.bountiful, delve.region, delve.service_format, delve.package_size), (8, True, "eu", "pilot", 1))
+        other = classify_wow_lot(lot("o1", "WoW raid service EU Pilot x1", "Terms"))
+        self.assertEqual((other.kind, other.mapping_state), ("unknown", "unmapped"))
 
         russian_mythic = classify_wow_lot(lot("m2", "Мифик+ +12 Европа самостоятельно x1", "Условия"))
         self.assertEqual((russian_mythic.kind, russian_mythic.mapping_state), ("mythic_plus", "mapped"))
@@ -50,24 +50,27 @@ class LotDiscoveryTests(unittest.TestCase):
 
     def test_unknown_or_ambiguous_lots_are_unmapped(self) -> None:
         unknown = classify_wow_lot(lot("u1", "WoW help", "No explicit service markers"))
-        both = classify_wow_lot(lot("u2", "Mythic+ and Delves Tier 8 EU self-play x1", ""))
+        missing = classify_wow_lot(lot("u2", "Mythic+ boost", ""))
         conflicting_region = classify_wow_lot(lot("u3", "Mythic+ +10 EU US self-play x1", ""))
         self.assertEqual((unknown.kind, unknown.mapping_state), ("unknown", "unmapped"))
-        self.assertEqual((both.kind, both.mapping_state), ("unknown", "unmapped"))
-        self.assertEqual((conflicting_region.kind, conflicting_region.mapping_state), ("mythic_plus", "unmapped"))
+        self.assertEqual((missing.kind, missing.mapping_state), ("unknown", "unmapped"))
+        self.assertFalse(missing.ambiguous)
+        self.assertEqual((conflicting_region.kind, conflicting_region.mapping_state), ("unknown", "unmapped"))
+        self.assertTrue(conflicting_region.ambiguous)
         self.assertIsNone(conflicting_region.region)
 
     def test_registry_is_local_and_only_accepts_mapped_templates(self) -> None:
         client = MockFunPayClient(own_lot_details=(
             lot("m1", "Mythic+ +10 EU self-play x1", "Terms"),
-            lot("d1", "Delves Tier 8 Normal EU Pilot x1", "Terms"),
+            lot("o1", "Raid service EU Pilot x1", "Terms"),
             lot("u1", "Unclassified", None),
         ))
         summary = LotDiscovery(client, self.registry).run()
-        self.assertEqual((summary.total, summary.mythic_plus, summary.delves, summary.unmapped), (3, 1, 1, 1))
+        self.assertEqual((summary.total, summary.mythic_plus, summary.unknown, summary.ambiguous), (3, 1, 2, 0))
         self.registry.select_template("mythic_plus", "m1")
-        self.registry.select_template("delves", "d1")
-        self.assertEqual(self.registry.selected_template_kinds(), ("delves", "mythic_plus"))
+        self.assertEqual(self.registry.selected_template_kinds(), ("mythic_plus",))
+        self.assertEqual(len(self.registry.list()), 3)
+        self.assertEqual(self.registry.list()[0].details.editor_options, {"fields[type]": (("Run", "run"),)})
         with self.assertRaises(ValueError):
             self.registry.select_template("mythic_plus", "u1")
         with self.database.session() as connection:
@@ -90,7 +93,25 @@ class LotDiscoveryTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(
             output.getvalue().strip(),
-            "discover-lots: own_lots=1 mythic_plus=0 delves=0 unmapped=1 mythic_template=not_selected delves_template=not_selected",
+            "discover-lots: own_lots=1 managed_mythic_plus=0 unknown=1 ambiguous=0 mythic_template=not_selected",
         )
         self.assertNotIn("sensitive-id", output.getvalue())
         self.assertNotIn("Private title", output.getvalue())
+
+    def test_legacy_non_mythic_classification_is_read_as_unmanaged_without_deletion(self) -> None:
+        self.registry.replace((RegisteredLot(
+            lot("legacy", "Raid service EU pilot x1", "Terms"),
+            classify_wow_lot(lot("legacy", "Raid service EU pilot x1", "Terms")),
+        ),))
+        with self.database.session() as connection:
+            connection.execute(
+                "UPDATE own_lot_registry SET classification = 'delves', mapping_state = 'mapped' "
+                "WHERE external_id = 'legacy'"
+            )
+        stored = self.registry.list()
+        self.assertEqual((stored[0].classification.kind, stored[0].classification.mapping_state), ("unknown", "unmapped"))
+        with self.database.session() as connection:
+            raw = connection.execute(
+                "SELECT classification FROM own_lot_registry WHERE external_id = 'legacy'"
+            ).fetchone()[0]
+        self.assertEqual(raw, "delves")

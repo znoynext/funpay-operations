@@ -16,6 +16,7 @@ from typing import Mapping, TextIO
 
 from .database import Database
 from .funpay import FunPayClient
+from .lot_discovery import classify_wow_lot
 from .lot_writes import (
     CapabilityState,
     LotWriteCapability,
@@ -24,7 +25,7 @@ from .lot_writes import (
     LotWriteResult,
     MockLotWriteClient,
 )
-from .service_catalog import CatalogService, DesiredState, ServiceCatalogRepository
+from .service_catalog import CatalogFamily, CatalogService, DesiredState, ServiceCatalogRepository
 
 
 class LotSyncDecision(StrEnum):
@@ -89,6 +90,8 @@ class DesiredLotState:
 class CurrentLotState:
     lot_id: str
     confirmed_service_code: str | None
+    managed_service_family: CatalogFamily | None
+    identity_confirmed: bool
     title: str
     description: str | None
     price_minor: int
@@ -140,14 +143,23 @@ class LotSyncPlanner:
         self.write_client = write_client
 
     def plan(self, desired: tuple[DesiredLotState, ...], current: tuple[CurrentLotState, ...]) -> LotSyncPlan:
+        if any(item.service.family is not CatalogFamily.MYTHIC_PLUS for item in desired):
+            raise ValueError("only Mythic+ catalog services can enter lot synchronization")
         codes = [item.service_code for item in desired]
         if len(codes) != len(set(codes)):
             raise ValueError("desired catalog contains duplicate stable codes")
         mapped: dict[str, list[CurrentLotState]] = defaultdict(list)
         for item in current:
-            if item.confirmed_service_code:
+            if (
+                item.confirmed_service_code
+                and item.managed_service_family is CatalogFamily.MYTHIC_PLUS
+                and item.identity_confirmed
+            ):
                 mapped[item.confirmed_service_code].append(item)
-        has_unconfirmed_lot = any(item.confirmed_service_code is None for item in current)
+        has_unconfirmed_lot = any(
+            not item.identity_confirmed or item.managed_service_family is not CatalogFamily.MYTHIC_PLUS
+            for item in current
+        )
         actions = tuple(sorted(
             (self._action(item, mapped.get(item.service_code, ()), has_unconfirmed_lot) for item in desired),
             key=lambda action: action.service_code,
@@ -355,6 +367,8 @@ class MockLotSyncCoordinator:
         replacement = CurrentLotState(
             lot_id=lot_id,
             confirmed_service_code=desired.service_code,
+            managed_service_family=CatalogFamily.MYTHIC_PLUS,
+            identity_confirmed=True,
             title=desired.title or (previous.title if previous else desired.service_code),
             description=description,
             price_minor=previous.price_minor if previous else 0,
@@ -376,6 +390,15 @@ class ConfirmedLotMappingRepository:
         if not lot_id.strip() or not service_code.strip():
             raise ValueError("lot id and service code are required")
         with self.database.session() as connection:
+            eligible = connection.execute(
+                """SELECT 1 FROM own_lot_registry lot, service_catalog catalog
+                WHERE lot.external_id = ? AND lot.classification = 'mythic_plus'
+                  AND lot.mapping_state = 'mapped' AND catalog.stable_code = ?
+                  AND catalog.family = 'mythic_plus'""",
+                (lot_id, service_code),
+            ).fetchone()
+            if eligible is None:
+                raise ValueError("only an exact confirmed Mythic+ identity can be mapped")
             connection.execute("DELETE FROM lot_service_mappings WHERE external_lot_id = ? OR service_code = ?", (lot_id, service_code))
             connection.execute(
                 "INSERT INTO lot_service_mappings (external_lot_id, service_code) VALUES (?, ?)", (lot_id, service_code)
@@ -388,15 +411,25 @@ def current_lots_from_funpay(
 ) -> tuple[CurrentLotState, ...]:
     """Adapt a mock/read client snapshot without doing any write operation."""
 
-    return tuple(
-        CurrentLotState(
-            lot_id=detail.lot_id, confirmed_service_code=confirmed_mappings.get(detail.lot_id), title=detail.title,
+    result: list[CurrentLotState] = []
+    for detail in client.get_own_lot_details():
+        classification = classify_wow_lot(detail)
+        service_code = confirmed_mappings.get(detail.lot_id)
+        confirmed = (
+            service_code is not None
+            and classification.kind == "mythic_plus"
+            and classification.mapping_state == "mapped"
+            and not classification.ambiguous
+        )
+        result.append(CurrentLotState(
+            lot_id=detail.lot_id, confirmed_service_code=service_code if confirmed else None,
+            managed_service_family=CatalogFamily.MYTHIC_PLUS if confirmed else None,
+            identity_confirmed=confirmed, title=detail.title,
             description=detail.description, price_minor=detail.price_minor, is_active=detail.is_active,
             category_node_id=detail.category_node_id, form_fields=detail.editor_fields,
             service_conditions=(confirmed_conditions or {}).get(detail.lot_id),
-        )
-        for detail in client.get_own_lot_details()
-    )
+        ))
+    return tuple(result)
 
 
 def desired_from_catalog(service: CatalogService, *, title: str | None = None, description: DescriptionTarget | None = None,
@@ -437,12 +470,31 @@ def _current_lots_from_registry(database: Database) -> tuple[CurrentLotState, ..
     with database.session() as connection:
         rows = connection.execute(
             """SELECT lot.external_id, lot.title, lot.description, lot.price_minor, lot.is_active,
-            lot.category_node_id, lot.editor_fields_json, mapping.service_code
-            FROM own_lot_registry lot LEFT JOIN lot_service_mappings mapping ON mapping.external_lot_id = lot.external_id"""
+            lot.category_node_id, lot.editor_fields_json, lot.classification, lot.mapping_state,
+            mapping.service_code, catalog.family AS service_family
+            FROM own_lot_registry lot
+            LEFT JOIN lot_service_mappings mapping ON mapping.external_lot_id = lot.external_id
+            LEFT JOIN service_catalog catalog ON catalog.stable_code = mapping.service_code"""
         ).fetchall()
     return tuple(
         CurrentLotState(
-            lot_id=row["external_id"], confirmed_service_code=row["service_code"], title=row["title"],
+            lot_id=row["external_id"],
+            confirmed_service_code=(
+                row["service_code"]
+                if row["classification"] == "mythic_plus" and row["mapping_state"] == "mapped"
+                and row["service_family"] == "mythic_plus"
+                else None
+            ),
+            managed_service_family=(
+                CatalogFamily.MYTHIC_PLUS
+                if row["classification"] == "mythic_plus" and row["mapping_state"] == "mapped"
+                and row["service_code"] is not None and row["service_family"] == "mythic_plus" else None
+            ),
+            identity_confirmed=(
+                row["classification"] == "mythic_plus" and row["mapping_state"] == "mapped"
+                and row["service_code"] is not None and row["service_family"] == "mythic_plus"
+            ),
+            title=row["title"],
             description=row["description"], price_minor=int(row["price_minor"]),
             is_active=None if row["is_active"] is None else bool(row["is_active"]), category_node_id=row["category_node_id"],
             form_fields=_json_object(row["editor_fields_json"]), service_conditions=None,
@@ -470,6 +522,8 @@ def _desired_view(desired: DesiredLotState) -> Mapping[str, object]:
 def _current_view(current: CurrentLotState) -> Mapping[str, object]:
     return {
         "lot_id": current.lot_id, "mapped_service_code": current.confirmed_service_code,
+        "managed_service_family": current.managed_service_family.value if current.managed_service_family else None,
+        "identity_confirmed": current.identity_confirmed,
         "is_active": current.is_active, "category_node_id": current.category_node_id,
     }
 

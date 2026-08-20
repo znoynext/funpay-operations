@@ -21,7 +21,6 @@ from .database import Database
 
 class CatalogFamily(StrEnum):
     MYTHIC_PLUS = "mythic_plus"
-    DELVES = "delves"
 
 
 class DesiredState(StrEnum):
@@ -30,7 +29,7 @@ class DesiredState(StrEnum):
 
 
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
-_RESERVED_CONDITIONS = {"region", "format", "package", "key_level", "tier", "mode"}
+_RESERVED_CONDITIONS = {"region", "format", "package", "key_level"}
 
 
 @dataclass(frozen=True)
@@ -86,13 +85,19 @@ class ServiceCatalogRepository:
                 )
             if codes:
                 placeholders = ", ".join("?" for _ in codes)
-                connection.execute(f"DELETE FROM service_catalog WHERE stable_code NOT IN ({placeholders})", codes)
+                connection.execute(
+                    f"DELETE FROM service_catalog WHERE family = 'mythic_plus' "
+                    f"AND stable_code NOT IN ({placeholders})",
+                    codes,
+                )
             else:
-                connection.execute("DELETE FROM service_catalog")
+                connection.execute("DELETE FROM service_catalog WHERE family = 'mythic_plus'")
 
     def list(self) -> tuple[CatalogService, ...]:
         with self.database.session() as connection:
-            rows = connection.execute("SELECT * FROM service_catalog ORDER BY stable_code").fetchall()
+            rows = connection.execute(
+                "SELECT * FROM service_catalog WHERE family = 'mythic_plus' ORDER BY stable_code"
+            ).fetchall()
         return tuple(
             CatalogService(
                 stable_code=row["stable_code"], family=CatalogFamily(row["family"]),
@@ -115,14 +120,12 @@ def load_catalog_definition(path: Path) -> Mapping[str, object]:
 def generate_catalog(definition: Mapping[str, object]) -> tuple[CatalogService, ...]:
     if definition.get("version") != 1:
         raise ServiceCatalogValidationError("catalog version must be 1")
+    if set(definition) - {"version", "mythic_plus"}:
+        raise ServiceCatalogValidationError("unsupported catalog fields; only mythic_plus is accepted")
     mythic_raw = definition.get("mythic_plus")
-    delves_raw = definition.get("delves")
-    if mythic_raw is None and delves_raw is None:
-        raise ServiceCatalogValidationError("choose at least one service family")
-    services = (
-        *(_generate_mythic_plus(_mapping(mythic_raw, "mythic_plus")) if mythic_raw is not None else ()),
-        *(_generate_delves(_mapping(delves_raw, "delves")) if delves_raw is not None else ()),
-    )
+    if mythic_raw is None:
+        raise ServiceCatalogValidationError("mythic_plus configuration is required")
+    services = _generate_mythic_plus(_mapping(mythic_raw, "mythic_plus"))
     _validate_services(services)
     return tuple(sorted(services, key=lambda service: service.stable_code))
 
@@ -161,12 +164,8 @@ def run_catalog_command(
         print(f"catalog validate: valid services={len(services)}", file=output)
         return 0
     if action == "preview":
-        families = {
-            family.value: sum(service.family is family for service in services)
-            for family in CatalogFamily
-        }
         print(
-            f"catalog preview: services={len(services)} mythic_plus={families['mythic_plus']} delves={families['delves']}",
+            f"catalog preview: services={len(services)} mythic_plus={len(services)}",
             file=output,
         )
         for service in services:
@@ -190,22 +189,6 @@ def _generate_mythic_plus(config: Mapping[str, object]) -> tuple[CatalogService,
         )
         for level, region, service_format, package, conditions in itertools.product(
             range(minimum, maximum + 1), common["regions"], formats, common["package_sizes"], _condition_combinations(common["conditions"]),
-        )
-    )
-
-
-def _generate_delves(config: Mapping[str, object]) -> tuple[CatalogService, ...]:
-    common = _common(config, CatalogFamily.DELVES)
-    minimum, maximum = _range(config, "min_tier", "max_tier")
-    modes = _choices(config.get("modes"), "modes", {"normal", "bountiful"}, required=True)
-    formats = _formats(config, required=False) or ("not_applicable",)
-    return tuple(
-        _service(
-            common, {"tier": tier, "mode": mode, "region": region, "service_format": service_format, "package_size": package},
-            f"delve_t{tier}_{mode}_{region}_{service_format}_x{package}", conditions,
-        )
-        for tier, mode, region, service_format, package, conditions in itertools.product(
-            range(minimum, maximum + 1), modes, common["regions"], formats, common["package_sizes"], _condition_combinations(common["conditions"]),
         )
     )
 
