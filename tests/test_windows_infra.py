@@ -66,6 +66,17 @@ class WindowsInfraTests(unittest.TestCase):
         self.assertEqual(result["database"], "ok")
         self.assertEqual(result["singleton"], "ok")
 
+    def test_human_diagnostics_treats_local_external_configuration_as_pending_not_failure(self) -> None:
+        summary = "\n".join(diagnostics_summary({
+            "directories": "ok", "singleton": "ok", "database": "ok", "migrations": "ok",
+            "autostart": "installed", "funpay": "configured", "telegram": "configured",
+            "webview2_runtime": "available", "catalog": "not_configured",
+        }))
+
+        self.assertIn("🟡 FunPay — настроен локально", summary)
+        self.assertIn("🟡 Telegram — настроен локально", summary)
+        self.assertNotIn("❌ Telegram — configured", summary)
+
     def test_scheduler_install_remove_and_uninstall_preserve_data(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

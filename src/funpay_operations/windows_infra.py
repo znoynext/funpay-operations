@@ -664,18 +664,29 @@ def diagnostics_summary(result: dict[str, str]) -> tuple[str, ...]:
     """Translate technical diagnostics to the compact local setup vocabulary."""
 
     def marker(value: str) -> str:
-        return "🟢" if value in {"ok", "available", "installed"} else "⚪" if value in {"not_configured", "skipped"} else "❌"
+        if value in {"ok", "available", "installed"}:
+            return "🟢"
+        if value == "configured":
+            return "🟡"
+        return "⚪" if value in {"not_configured", "skipped"} else "❌"
+
+    def local_configuration(value: str | None) -> str:
+        if value == "configured":
+            return "настроен локально"
+        if value in {None, "skipped", "not_configured"}:
+            return "не настроен"
+        return "не удалось проверить"
 
     application = "готово" if result.get("directories") == "ok" and result.get("singleton") == "ok" else "требует внимания"
     database = "готова" if result.get("database") == "ok" and result.get("migrations") == "ok" else "не удалось проверить"
-    funpay = "не настроен" if result.get("funpay") in {None, "skipped", "not_configured"} else "настроен"
-    telegram = "не настроен" if result.get("telegram") == "not_configured" else result.get("telegram", "требует внимания")
+    funpay = local_configuration(result.get("funpay"))
+    telegram = local_configuration(result.get("telegram"))
     catalog = "готов" if result.get("catalog") == "ok" else "не настроен"
     return (
         f"{marker(result.get('directories', 'error'))} Application — {application}",
         f"{marker(result.get('database', 'error'))} Database — {database}",
         f"{marker(result.get('autostart', 'not_configured'))} Autostart — {'включён' if result.get('autostart') == 'installed' else 'не настроен'}",
-        f"⚪ FunPay — {funpay}",
+        f"{marker(result.get('funpay', 'not_configured'))} FunPay — {funpay}",
         f"{marker(result.get('webview2_runtime', 'unavailable'))} WebView2 — {'доступен' if result.get('webview2_runtime') == 'available' else 'требуется Runtime'}",
         f"{marker(result.get('telegram', 'not_configured'))} Telegram — {telegram}",
         f"{marker(result.get('catalog', 'not_configured'))} Service catalog — {catalog}",
