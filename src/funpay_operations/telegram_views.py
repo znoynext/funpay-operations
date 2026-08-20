@@ -20,11 +20,13 @@ class StatusView:
 class DashboardView:
     statuses: tuple[StatusView, ...]
     mythic_lots: int
-    delve_lots: int
     attention_lots: int
     last_price_update: str
     last_raise: str
     next_raise: str
+    last_funpay_read: str = "Пока не проверено"
+    unknown_lots: int = 0
+    ambiguous_lots: int = 0
 
 
 @dataclass(frozen=True)
@@ -54,11 +56,12 @@ class LotView:
     attributes: tuple[str, ...]
     price_minor: int
     mode: str
-    hard_floor_minor: int
+    hard_floor_minor: int | None
     references: tuple[ReferencePriceView, ...]
     calculation: str
     warning: str | None = None
     technical_detail: str | None = None
+    managed: bool = True
 
 
 @dataclass(frozen=True)
@@ -122,12 +125,14 @@ def dashboard_text(view: DashboardView, *, emergency_active: bool) -> str:
     status_lines = "\n".join(f"• {item.label}: {item.value}" for item in view.statuses)
     emergency = "\n\n🔴 AUTOMATION STOPPED" if emergency_active else ""
     return (
-        "🤖 FunPay Bot\n\n"
+        "🤖 FunPay Operations for World of Warcraft Mythic+\n\n"
         f"Статусы:\n{status_lines}{emergency}\n\n"
-        "Кратко:\n"
-        f"• Mythic+ лотов: {view.mythic_lots}\n"
-        f"• Delves лотов: {view.delve_lots}\n"
+        "Мои лоты:\n"
+        f"• Управляемые Mythic+ лоты: {view.mythic_lots}\n"
+        f"• Не управляется ботом: {view.unknown_lots}\n"
+        f"• Неоднозначно: {view.ambiguous_lots}\n"
         f"• Требуют внимания: {view.attention_lots}\n"
+        f"• Последнее чтение FunPay: {view.last_funpay_read}\n"
         f"• Последнее обновление цен: {view.last_price_update}\n"
         f"• Последний raise: {view.last_raise}\n"
         f"• Следующий raise: {view.next_raise}"
@@ -157,7 +162,7 @@ def lot_text(view: LotView) -> str:
         f"{' • '.join(view.attributes)}\n\n"
         f"Цена: {rubles(view.price_minor)}\n"
         f"Режим: {_mode_label(view.mode)}\n"
-        f"Hard floor: {rubles(view.hard_floor_minor)}\n\n"
+        f"Минимально допустимая цена: {_minimum_price(view.hard_floor_minor)}\n\n"
         f"Ориентир:\n{references}\n\n"
         f"Расчёт:\n{view.calculation}{warning}"
     )
@@ -184,19 +189,12 @@ def price_preview_text(view: PricePreviewView) -> str:
 
 
 def sellers_text(sellers: tuple[TrustedSellerView, ...]) -> str:
-    grouped = {"Mythic+": [], "Delves": []}
-    for seller in sellers:
-        grouped.setdefault(seller.family, []).append(seller)
-    lines = ["👥 Доверенные продавцы", ""]
-    for family in ("Mythic+", "Delves"):
-        lines.append(family)
-        rows = grouped[family]
-        lines.extend(
-            f"• {seller.nickname} {'🟢' if seller.enabled and seller.verified else '⚪'}" for seller in rows
-        )
-        if not rows:
-            lines.append("• Пока нет")
-        lines.append("")
+    lines = ["👥 Доверенные продавцы", "", "Mythic+"]
+    lines.extend(
+        f"• {seller.nickname} {'🟢' if seller.enabled and seller.verified else '⚪'}" for seller in sellers
+    )
+    if not sellers:
+        lines.append("• Пока нет")
     return "\n".join(lines).rstrip()
 
 
@@ -211,13 +209,17 @@ def mappings_text(choices: tuple[MappingChoiceView, ...]) -> str:
 
 
 def settings_text(auto_reply_enabled: bool) -> str:
-    enabled = "🟢 Включен" if auto_reply_enabled else "🔴 Выключен"
+    enabled = "🔴 Выключен" if not auto_reply_enabled else "🔒 Включение заблокировано"
     return (
         "⚙️ Настройки\n\n"
         f"Автоответ: {enabled}\n"
         "Текст: Привет\n"
         "Отправляется максимум один раз в новом диалоге."
     )
+
+
+def _minimum_price(value: int | None) -> str:
+    return rubles(value) if value is not None else "⚠️ Не настроена"
 
 
 def _mode_label(mode: str) -> str:
@@ -230,4 +232,4 @@ def _mode_label(mode: str) -> str:
 
 
 def _family_icon(family: str) -> str:
-    return "⚔️" if family == "Mythic+" else "🕳"
+    return "⚔️"

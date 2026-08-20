@@ -25,13 +25,11 @@ class SellerMatchingEngineTests(unittest.TestCase):
     def setUp(self) -> None:
         self.engine = SellerMatchingEngine()
 
-    def test_exact_mythic_plus_and_delves_require_complete_structured_signature(self) -> None:
+    def test_exact_mythic_plus_requires_complete_structured_signature(self) -> None:
         mythic = _mplus_spec()
-        delve = _delve_spec()
-        self.assertEqual(self.engine.match(_mplus_snapshot(), (mythic, delve)).result, MatchResult.EXACT)
-        assessment = self.engine.match(_delve_snapshot(), (mythic, delve))
+        assessment = self.engine.match(_mplus_snapshot(), (mythic,))
         self.assertEqual(assessment.result, MatchResult.EXACT)
-        self.assertEqual(assessment.service_code, "delve_t8_bountiful_eu_selfplay_x1")
+        self.assertEqual(assessment.service_code, "mplus_k10_eu_selfplay_x1")
 
     def test_ambiguous_never_selects_a_service_code(self) -> None:
         duplicate_signature = ServiceMatchSpec(**(_mplus_spec().__dict__ | {"service_code": "another_code"}))
@@ -68,13 +66,14 @@ class TrustedSellerRepositoryTests(unittest.TestCase):
         self.sellers = TrustedSellerRepository(self.database)
         self.mappings = CompetitorLotMappingRepository(self.database)
         self.api = ManualSellerConfirmationAPI(self.sellers, self.mappings)
+        self._store_service("mplus_k10_eu_selfplay_x1")
 
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
 
     def test_add_mock_disable_and_remove_seller_are_local_and_cascade_mappings(self) -> None:
         seller = self.api.add_mock_seller(
-            "mock-seller", "Mock Seller", SellerFamily.MYTHIC_PLUS,
+            "mock-seller", "Mock Seller",
             verification_state=SellerVerificationState.VERIFIED,
         )
         self.assertTrue(seller.enabled)
@@ -85,12 +84,12 @@ class TrustedSellerRepositoryTests(unittest.TestCase):
         self.assertIsNone(self.mappings.get("mock-seller", "mock-lot"))
 
     def test_manual_confirmation_accepts_only_exact_enabled_verified_seller(self) -> None:
-        self.api.add_mock_seller("mock-seller", "Mock Seller", SellerFamily.MYTHIC_PLUS)
+        self.api.add_mock_seller("mock-seller", "Mock Seller")
         with self.assertRaisesRegex(ValueError, "enabled and verified"):
             self.api.confirm_match(_mplus_snapshot(), (_mplus_spec(),))
 
         self.sellers.add_mock_seller(
-            "mock-seller", "Mock Seller", SellerFamily.MYTHIC_PLUS,
+            "mock-seller", "Mock Seller",
             verification_state=SellerVerificationState.VERIFIED,
         )
         with self.assertRaisesRegex(ValueError, "ambiguous"):
@@ -104,6 +103,7 @@ class TrustedSellerRepositoryTests(unittest.TestCase):
         self._verified_seller()
         first = self.api.confirm_match(_mplus_snapshot(), (_mplus_spec(),))
         replacement = _mplus_spec("mplus_k10_eu_selfplay_x1_new")
+        self._store_service(replacement.service_code)
         remapped = self.api.remap_lot(_mplus_snapshot(), (replacement,))
         self.assertNotEqual(first.service_code, remapped.service_code)
         self.assertEqual(remapped.service_code, replacement.service_code)
@@ -131,44 +131,53 @@ class TrustedSellerRepositoryTests(unittest.TestCase):
         self.assertEqual(assessment.result, MatchResult.EXACT)
         self.assertIsNone(self.mappings.get("mock-seller", "mock-lot"))
 
+    def test_legacy_non_mythic_seller_is_hidden_and_preserved(self) -> None:
+        with self.database.session() as connection:
+            connection.execute(
+                """INSERT INTO trusted_seller_profiles
+                (seller_id, nickname, family, enabled, verification_state, last_checked_state)
+                VALUES ('legacy-seller', 'Legacy Seller', 'delves', 1, 'verified', 'current')"""
+            )
+        self.assertIsNone(self.sellers.get("legacy-seller"))
+        self.assertNotIn("legacy-seller", {item.seller_id for item in self.sellers.list()})
+        self.assertFalse(self.sellers.remove_seller("legacy-seller"))
+        with self.database.session() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM trusted_seller_profiles WHERE seller_id = 'legacy-seller'"
+            ).fetchone()
+        self.assertIsNotNone(row)
+
     def _verified_seller(self) -> None:
         self.api.add_mock_seller(
-            "mock-seller", "Mock Seller", SellerFamily.MYTHIC_PLUS,
+            "mock-seller", "Mock Seller",
             verification_state=SellerVerificationState.VERIFIED,
         )
+
+    def _store_service(self, code: str) -> None:
+        with self.database.session() as connection:
+            connection.execute(
+                """INSERT OR IGNORE INTO service_catalog
+                (stable_code, family, variant_json, enabled, desired_state, template_reference,
+                 description_profile, price_policy_reference, price_conditions_json)
+                VALUES (?, 'mythic_plus', '{}', 1, 'enabled', 'template', 'profile', 'policy', '{}')""",
+                (code,),
+            )
 
 
 def _mplus_spec(code: str = "mplus_k10_eu_selfplay_x1") -> ServiceMatchSpec:
     return ServiceMatchSpec(
         service_code=code, family=SellerFamily.MYTHIC_PLUS, category="wow-mplus", region="eu",
-        key_level=10, tier=None, bountiful=None, service_format="selfplay", package_size=1,
+        key_level=10, service_format="selfplay", package_size=1,
         substantial_conditions={"timed": "yes"},
     )
-
-
-def _delve_spec() -> ServiceMatchSpec:
-    return ServiceMatchSpec(
-        service_code="delve_t8_bountiful_eu_selfplay_x1", family=SellerFamily.DELVES, category="wow-delves", region="eu",
-        key_level=None, tier=8, bountiful=True, service_format="selfplay", package_size=1,
-        substantial_conditions={"key": "included"},
-    )
-
 
 def _mplus_snapshot(*, region: str | None = "eu", key_level: int | None = 10, title: str = "Mock M+ 10",
                     conditions: dict[str, str] | None = None, form_fields: dict[str, str] | None = None,
                     form_options: dict[str, tuple[str, ...]] | None = None) -> CompetitorLotSnapshot:
     return CompetitorLotSnapshot(
         seller_id="mock-seller", lot_id="mock-lot", title=title, family=SellerFamily.MYTHIC_PLUS, category="wow-mplus",
-        region=region, key_level=key_level, tier=None, bountiful=None, service_format="selfplay", package_size=1,
+        region=region, key_level=key_level, service_format="selfplay", package_size=1,
         substantial_conditions=conditions if conditions is not None else {"timed": "yes"},
         form_fields=form_fields if form_fields is not None else {"amount": "1"},
         form_options=form_options if form_options is not None else {"mode": ("selfplay",)},
-    )
-
-
-def _delve_snapshot() -> CompetitorLotSnapshot:
-    return CompetitorLotSnapshot(
-        seller_id="mock-seller", lot_id="mock-delve", title="Mock Delve 8", family=SellerFamily.DELVES, category="wow-delves",
-        region="eu", key_level=None, tier=8, bountiful=True, service_format="selfplay", package_size=1,
-        substantial_conditions={"key": "included"}, form_fields={"amount": "1"}, form_options={"mode": ("bountiful",)},
     )

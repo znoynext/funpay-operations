@@ -14,21 +14,5 @@
     "template_reference": "mplus_example",
     "description_profile": "mplus_standard",
     "price_policy_reference": "mplus_standard"
-  },
-  "delves": {
-    "min_tier": 1,
-    "max_tier": 2,
-    "modes": ["normal", "bountiful"],
-    "regions": ["eu"],
-    "service_formats": ["selfplay", "pilot"],
-    "package_sizes": [1, 2],
-    "price_conditions": {
-      "key_source": ["included", "buyer"]
-    },
-    "enabled": false,
-    "desired_state": "disabled",
-    "template_reference": "delve_example",
-    "description_profile": "delve_standard",
-    "price_policy_reference": "delve_standard"
   }
 }

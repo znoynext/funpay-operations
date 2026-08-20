@@ -59,7 +59,7 @@ from funpay_operations.runtime import (
     SleepResumeHandler,
     TaskDisposition,
 )
-from funpay_operations.service_catalog import CatalogFamily, CatalogService, DesiredState
+from funpay_operations.service_catalog import CatalogFamily, CatalogService, DesiredState, ServiceCatalogRepository
 from funpay_operations.telegram import MockTelegramApi, TelegramCommandHandler, TelegramLongPollingBot, TelegramUpdate
 from funpay_operations.telegram_control import (
     CompositeTelegramRouter,
@@ -227,6 +227,7 @@ class PricingMockE2ETests(unittest.TestCase):
 
     def test_trusted_repository_exact_mapping_to_verified_price_and_raise(self) -> None:
         service = _catalog_service("mplus", CatalogFamily.MYTHIC_PLUS)
+        ServiceCatalogRepository(self.database).replace((service,))
         spec = ServiceMatchSpec.from_catalog(service, category="wow")
         seller_repository = TrustedSellerRepository(self.database)
         mapping_repository = CompetitorLotMappingRepository(self.database)
@@ -234,7 +235,7 @@ class PricingMockE2ETests(unittest.TestCase):
         records: list[PriceObservationRecord] = []
         for index, seller_id in enumerate(("seller-a", "seller-b")):
             confirmation.add_mock_seller(
-                seller_id, f"Mock {index}", SellerFamily.MYTHIC_PLUS,
+                seller_id, f"Mock {index}",
                 verification_state=SellerVerificationState.VERIFIED,
             )
             snapshot = _competitor_snapshot(seller_id, f"lot-{index}")
@@ -251,6 +252,7 @@ class PricingMockE2ETests(unittest.TestCase):
             lots=(ManagedPriceLot(
                 "own-mplus", SellerFamily.MYTHIC_PLUS,
                 OwnLotPriceState("mplus", 11_000, "RUB", OwnLotPricingMode.AUTOMATIC),
+                True,
             ),),
             sellers=seller_repository.list(),
             mappings=tuple(
@@ -314,7 +316,7 @@ class PricingMockE2ETests(unittest.TestCase):
         self.assertTrue(drop_batch.decisions[0].consensus.high_volatility_consensus)
         self.assertEqual(drop.prices["own-drop"], 3_900)
 
-    def test_retry_rollback_and_bidirectional_family_isolation(self) -> None:
+    def test_retry_and_rollback(self) -> None:
         retry_adapter = MockOwnLotPriceAdapter({"own-retry": 11_000}, stale_write_attempts={"own-retry": 1})
         retry = _price_coordinator(self.database, retry_adapter, service_code="retry", prices=(10_000, 10_100))
         self.assertEqual(retry.run(TransactionMode.EXECUTE).batches[0].status, FamilyBatchStatus.COMPLETED)
@@ -324,21 +326,6 @@ class PricingMockE2ETests(unittest.TestCase):
             FamilyBatchStatus.ROLLED_BACK,
         )
         self.assertEqual(retry_adapter.prices["own-retry"], 11_000)
-
-        for failing_family in (SellerFamily.MYTHIC_PLUS, SellerFamily.DELVES):
-            with self.subTest(failing_family=failing_family):
-                database = Database(Path(self.temporary_directory.name) / f"{failing_family.value}.sqlite3")
-                database.initialize()
-                adapter = MockOwnLotPriceAdapter(
-                    {"own-m": 11_000, "own-d": 11_000},
-                    write_failures={"own-m" if failing_family is SellerFamily.MYTHIC_PLUS else "own-d"},
-                )
-                coordinator = _two_family_coordinator(database, adapter)
-                batches = {item.family: item for item in coordinator.run(TransactionMode.EXECUTE).batches}
-                self.assertEqual(batches[failing_family].status, FamilyBatchStatus.FAILED)
-                other = SellerFamily.DELVES if failing_family is SellerFamily.MYTHIC_PLUS else SellerFamily.MYTHIC_PLUS
-                self.assertEqual(batches[other].status, FamilyBatchStatus.COMPLETED)
-
 
 class LotsMockE2ETests(unittest.TestCase):
     def test_create_reread_verify_and_repeat_are_idempotent(self) -> None:
@@ -520,15 +507,12 @@ class BackgroundMockE2ETests(unittest.IsolatedAsyncioTestCase):
 
 
 def _catalog_service(code: str, family: CatalogFamily) -> CatalogService:
+    if family is not CatalogFamily.MYTHIC_PLUS:
+        raise ValueError("mock catalog supports Mythic+ only")
     variant = {
         "region": "eu", "service_format": "selfplay", "package_size": 1,
         "key_level": 10,
     }
-    if family is CatalogFamily.DELVES:
-        variant = {
-            "region": "eu", "service_format": "selfplay", "package_size": 1,
-            "tier": 8, "mode": "bountiful",
-        }
     return CatalogService(
         code, family, variant, True, DesiredState.ENABLED, "template", "description", "policy", {"timed": "yes"}
     )
@@ -537,7 +521,7 @@ def _catalog_service(code: str, family: CatalogFamily) -> CatalogService:
 def _competitor_snapshot(seller_id: str, lot_id: str) -> CompetitorLotSnapshot:
     return CompetitorLotSnapshot(
         seller_id, lot_id, "Synthetic Mythic+", SellerFamily.MYTHIC_PLUS, "wow", "eu", 10,
-        None, None, "selfplay", 1, {"timed": "yes"}, {"level": "10"}, {"format": ("selfplay",)},
+        "selfplay", 1, {"timed": "yes"}, {"level": "10"}, {"format": ("selfplay",)},
     )
 
 
@@ -613,44 +597,12 @@ def _price_coordinator(
         lots=(ManagedPriceLot(
             lot_id, SellerFamily.MYTHIC_PLUS,
             OwnLotPriceState(service_code, adapter.prices[lot_id], "RUB", mode, fixed),
+            True,
         ),),
         sellers=sellers,
         mappings=mappings,
         history=history,
         policies={service_code: PricePolicy(floor, 100, "RUB")},
-    )
-
-
-def _two_family_coordinator(database: Database, adapter: MockOwnLotPriceAdapter) -> PriceUpdateCoordinator:
-    services = (("mplus", SellerFamily.MYTHIC_PLUS, "own-m"), ("delves", SellerFamily.DELVES, "own-d"))
-    sellers = tuple(
-        _seller(f"{code}-{index}", family)
-        for code, family, _ in services for index in range(2)
-    )
-    mappings = tuple(_mapping(seller.seller_id, seller.seller_id.rsplit("-", 1)[0]) for seller in sellers)
-    records = tuple(
-        PriceObservationRecord(
-            f"obs-{seller.seller_id}",
-            TrustedPriceObservation(
-                seller.seller_id, f"lot-{seller.seller_id}", seller.seller_id.rsplit("-", 1)[0],
-                10_000, "RUB",
-            ),
-            f"hash-{seller.seller_id}", "stable", 2,
-        )
-        for seller in sellers
-    )
-    return PriceUpdateCoordinator(
-        observation_adapter=MockCompetitorObservationAdapter(records),
-        own_price_adapter=adapter,
-        safety_engine=SafetyValidatedPricingEngine(),
-        snapshots=PriceSnapshotRepository(database),
-        lots=tuple(ManagedPriceLot(
-            lot_id, family, OwnLotPriceState(code, 11_000, "RUB", OwnLotPricingMode.AUTOMATIC)
-        ) for code, family, lot_id in services),
-        sellers=sellers,
-        mappings=mappings,
-        history=(),
-        policies={code: PricePolicy(1_000, 100, "RUB") for code, _, _ in services},
     )
 
 
@@ -677,6 +629,9 @@ def _current_lot(
     fields: dict[str, str] | None = None,
 ) -> CurrentLotState:
     return CurrentLotState(
-        lot_id, service_code, title, description, 10_000, active, "node-1",
-        fields or {"level": "10"}, {"timed": "yes"},
+        lot_id=lot_id, confirmed_service_code=service_code,
+        managed_service_family=CatalogFamily.MYTHIC_PLUS if service_code else None,
+        identity_confirmed=service_code is not None, title=title, description=description,
+        price_minor=10_000, is_active=active, category_node_id="node-1",
+        form_fields=fields or {"level": "10"}, service_conditions={"timed": "yes"},
     )

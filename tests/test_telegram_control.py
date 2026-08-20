@@ -5,6 +5,7 @@ import unittest
 
 from funpay_operations.telegram import MockTelegramApi, TelegramCommandHandler, TelegramLongPollingBot, TelegramUpdate
 from funpay_operations.telegram_control import CONTROL_MENU, EmergencyStopGate, MockControlService, TelegramControlRouter
+from funpay_operations.telegram_views import LotView
 from tests.test_telegram import InMemoryStates
 
 
@@ -41,9 +42,10 @@ class TelegramControlRouterTests(unittest.TestCase):
 
     def test_dashboard_has_compact_human_menu_and_no_emergency_button(self) -> None:
         reply = self.router.handle(self.update("Статус"))
-        self.assertIn("🤖 FunPay Bot", reply.text)
+        self.assertIn("🤖 FunPay Operations for World of Warcraft Mythic+", reply.text)
         self.assertIn("Emergency stop", reply.text)
-        self.assertEqual(CONTROL_MENU["keyboard"][0], ["⚔️ Mythic+", "🕳 Delves"])
+        self.assertEqual(CONTROL_MENU["keyboard"][0], ["⚔️ Mythic+"])
+        self.assertNotIn("Delves", str(CONTROL_MENU))
         self.assertNotIn("Emergency stop", str(CONTROL_MENU))
         self.assertIn("inline_keyboard", reply.reply_markup)
 
@@ -54,14 +56,13 @@ class TelegramControlRouterTests(unittest.TestCase):
         self.assertIn("⚔️ Mythic+", lots.text)
         self.assertTrue(lots.edit_message)
         home = self.press(lots, "🏠 Главная")
-        self.assertIn("🤖 FunPay Bot", home.text)
+        self.assertIn("🤖 FunPay Operations for World of Warcraft Mythic+", home.text)
 
-    def test_mythic_and_delves_family_summaries_are_human_readable(self) -> None:
+    def test_only_mythic_family_summary_is_available(self) -> None:
         mythic = self.router.handle(self.update("⚔️ Mythic+"))
-        delves = self.router.handle(self.update("🕳 Delves"))
         self.assertIn("Управляемые лоты", mythic.text)
         self.assertIn("Automatic", mythic.text)
-        self.assertIn("🕳 Delves", delves.text)
+        self.assertIsNone(self.router.handle(self.update("🕳 Delves")))
 
     def test_lot_details_hide_internal_reference_until_details_button(self) -> None:
         family = self.router.handle(self.update("⚔️ Mythic+"))
@@ -76,15 +77,30 @@ class TelegramControlRouterTests(unittest.TestCase):
     def test_lot_mode_fixed_price_and_hard_floor_use_clear_input_state(self) -> None:
         family = self.router.handle(self.update("⚔️ Mythic+"))
         lot = self.press(self.press(family, "📦 Лоты"), "Mythic+ +10")
-        fixed = self.press(lot, "Fixed price")
+        fixed = self.press(lot, "Fixed price (локально)")
         self.assertIn("Введите fixed price", fixed.text)
         updated = self.router.handle(self.update("1555"))
         self.assertIn("Цена: 1555 ₽", updated.text)
-        self.press(updated, "Hard floor")
+        self.press(updated, "Минимальная цена")
         updated = self.router.handle(self.update("1200"))
-        self.assertIn("Hard floor: 1200 ₽", updated.text)
+        self.assertIn("Минимально допустимая цена: 1200 ₽", updated.text)
         self.assertIn(("lot_set_fixed", "m10:1555"), self.services.calls)
         self.assertIn(("lot_set_floor", "m10:1200"), self.services.calls)
+
+    def test_non_managed_lot_has_no_pricing_or_mutation_controls(self) -> None:
+        services = MockControlService(_lots={
+            "other": LotView(
+                "other", "Другие лоты", "Other WoW service", ("Параметры не подтверждены",),
+                100_000, "check_only", None, (), "Расчёт недоступен",
+                warning="Не управляется ботом.", managed=False,
+            ),
+        })
+        router = TelegramControlRouter((1,), self.states, services, self.gate)
+        lots = router.handle(self.update("📦 Лоты"))
+        lot = router.handle(self.update(callback=self.callback(lots, "Other WoW service")))
+        buttons = [button["text"] for row in lot.reply_markup["inline_keyboard"] for button in row]
+        self.assertEqual(buttons, ["Подробнее", "Назад", "🏠 Главная"])
+        self.assertNotIn("Режим (локально)", buttons)
 
     def test_price_preview_has_only_changes_then_confirmation(self) -> None:
         prices = self.router.handle(self.update("💰 Цены"))
@@ -115,7 +131,7 @@ class TelegramControlRouterTests(unittest.TestCase):
         self.assertEqual(prompt.text, "Введите ник продавца")
         found = self.router.handle(self.update("SellerName"))
         self.assertIn("FunPay profile verified", found.text)
-        added = self.press(found, "✅ Добавить")
+        added = self.press(found, "Добавить для Mythic+")
         self.assertIn("SellerName 🟢", added.text)
         disable = self.press(added, "Отключить")
         disabled = self.press(disable, "SellerTwo")
@@ -128,6 +144,7 @@ class TelegramControlRouterTests(unittest.TestCase):
         remove = self.press(remapped, "Удалить")
         deleted = self.press(remove, "SellerName")
         self.assertNotIn("SellerName 🟢", deleted.text)
+        self.assertIn(("seller_add", "SellerName"), self.services.calls)
 
     def test_messages_screen_explains_reply_flow_without_dialog_ids(self) -> None:
         reply = self.router.handle(self.update("💬 Сообщения"))

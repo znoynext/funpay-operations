@@ -8,7 +8,7 @@ from typing import Mapping, Protocol
 from urllib.parse import urlparse
 
 from .auto_reply import AutoReplyService
-from .funpay import FunPayClient, FunPayError, FunPayMessage
+from .funpay import FunPayClient, FunPayError, FunPayMessage, FunPaySessionExpired
 from .repositories import DialogRepository, TaskStateRepository, TelegramMessageLinkRepository
 from .telegram import TelegramError
 
@@ -27,7 +27,8 @@ class FunPayMessageNotifier:
     def __init__(
         self, funpay: FunPayClient, sender: TelegramNotificationSender, dialogs: DialogRepository,
         links: TelegramMessageLinkRepository, states: TaskStateRepository, recipient_id: int,
-        logger: logging.Logger, auto_replies: AutoReplyService | None = None,
+        logger: logging.Logger, auto_replies: AutoReplyService | None = None, *,
+        bootstrap_existing_messages: bool = False, outbound_replies_enabled: bool = True,
     ) -> None:
         self._funpay = funpay
         self._sender = sender
@@ -37,14 +38,29 @@ class FunPayMessageNotifier:
         self._recipient_id = recipient_id
         self._logger = logger
         self._auto_replies = auto_replies
+        self._bootstrap_existing_messages = bootstrap_existing_messages
+        self._outbound_replies_enabled = outbound_replies_enabled
 
     def sync(self) -> None:
         state = self._states.load("funpay_message_notifications")
         cursor = state[1] if state else None
         try:
             messages = self._funpay.get_new_messages(cursor)
+        except FunPaySessionExpired:
+            raise
         except FunPayError:
             self._logger.warning("FunPay message sync unavailable; cursor was retained")
+            return
+        if state is None and self._bootstrap_existing_messages:
+            for message in messages:
+                dialog_id = self._dialogs.upsert_dialog(message.dialog_id, None, message.buyer_nickname)
+                self._dialogs.store_message_with_id(
+                    message.message_id, dialog_id, message.direction, message.body, message.sent_at or "unknown"
+                )
+                cursor = _advance_cursor(cursor, message)
+            self._states.save("funpay_message_notifications", "running", cursor)
+            if self._auto_replies is not None and not self._auto_replies.is_initialized():
+                self._auto_replies.mark_initialized()
             return
         initial_auto_reply_sync = self._auto_replies is not None and not self._auto_replies.is_initialized()
         for message in messages:
@@ -66,7 +82,8 @@ class FunPayMessageNotifier:
             return True
         try:
             telegram_message_id = self._sender.send_private_notification(
-                self._recipient_id, _notification_text(message), _notification_markup(dialog_id, message.dialog_url)
+                self._recipient_id, _notification_text(message),
+                _notification_markup(dialog_id, message.dialog_url, self._outbound_replies_enabled)
             )
         except (TelegramError, PermissionError):
             # The body and buyer information are intentionally not part of logs.
@@ -86,7 +103,7 @@ def _notification_text(message: FunPayMessage) -> str:
     return f"💬 {buyer}\n{related}\n\n{body}"[:4096]
 
 
-def _notification_markup(dialog_id: int, dialog_url: str | None) -> Mapping[str, object]:
+def _notification_markup(dialog_id: int, dialog_url: str | None, outbound_replies_enabled: bool = True) -> Mapping[str, object]:
     open_button: dict[str, str] = {"text": "Открыть FunPay"}
     if _is_safe_funpay_url(dialog_url):
         open_button["url"] = dialog_url or ""
@@ -96,7 +113,10 @@ def _notification_markup(dialog_id: int, dialog_url: str | None) -> Mapping[str,
         open_button["callback_data"] = f"funpay_open:{dialog_id}"
     return {
         "inline_keyboard": [
-            [{"text": "Ответить", "callback_data": f"funpay_reply:{dialog_id}"}],
+            [{
+                "text": "Ответить" if outbound_replies_enabled else "Ответить 🔒",
+                "callback_data": f"funpay_reply:{dialog_id}",
+            }],
             [open_button],
         ]
     }

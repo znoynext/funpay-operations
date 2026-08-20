@@ -50,22 +50,21 @@ class RaiseCoordinatorTests(unittest.TestCase):
         coordinator, source, _, client, attempts = _coordinator(self.database)
         result = coordinator.run("scheduled-1", now=NOW)
         self.assertEqual(source.calls, 1)
-        self.assertEqual([item.status for item in result.families], [RaiseResultStatus.COMPLETED, RaiseResultStatus.COMPLETED])
+        self.assertEqual([item.status for item in result.families], [RaiseResultStatus.COMPLETED])
         self.assertEqual([item[0] for item in client.calls], list(SellerFamily))
         self.assertEqual(attempts.last(SellerFamily.MYTHIC_PLUS).last_result, RaiseResultStatus.COMPLETED)
 
-    def test_pricing_verification_failure_blocks_only_affected_family(self) -> None:
+    def test_pricing_verification_failure_blocks_raise(self) -> None:
         coordinator, _, _, client, attempts = _coordinator(self.database, stale_mplus=2)
         result = coordinator.run("scheduled-2", now=NOW)
         self.assertEqual(result.families[0].status, RaiseResultStatus.BLOCKED)
-        self.assertEqual(result.families[1].status, RaiseResultStatus.COMPLETED)
-        self.assertEqual([item[0] for item in client.calls], [SellerFamily.DELVES])
+        self.assertEqual(client.calls, [])
         self.assertIn("verification mismatch", attempts.last(SellerFamily.MYTHIC_PLUS).failure_reason)
 
     def test_unsupported_raise_is_not_reported_as_success(self) -> None:
         coordinator, _, _, client, _ = _coordinator(self.database, capability_state=CapabilityState.UNSUPPORTED)
         result = coordinator.run("scheduled-3", now=NOW)
-        self.assertEqual([item.status for item in result.families], [RaiseResultStatus.UNSUPPORTED, RaiseResultStatus.UNSUPPORTED])
+        self.assertEqual([item.status for item in result.families], [RaiseResultStatus.UNSUPPORTED])
         self.assertEqual(client.calls, [])
 
     def test_unavailable_raise_is_not_called(self) -> None:
@@ -73,7 +72,7 @@ class RaiseCoordinatorTests(unittest.TestCase):
             self.database, availability=RaiseAvailability.UNAVAILABLE
         )
         result = coordinator.run("scheduled-unavailable", now=NOW)
-        self.assertEqual([item.status for item in result.families], [RaiseResultStatus.UNAVAILABLE, RaiseResultStatus.UNAVAILABLE])
+        self.assertEqual([item.status for item in result.families], [RaiseResultStatus.UNAVAILABLE])
         self.assertEqual(client.calls, [])
 
     def test_non_mock_raise_adapter_is_rejected_before_any_run(self) -> None:
@@ -103,17 +102,17 @@ class RaiseCoordinatorTests(unittest.TestCase):
         result = coordinator.run("scheduled-5", now=NOW)
         self.assertEqual(result.families[0].status, RaiseResultStatus.FAILED)
         self.assertEqual(attempts.last(SellerFamily.MYTHIC_PLUS).last_result, RaiseResultStatus.FAILED)
-        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(len(client.calls), 1)
 
     def test_local_cooldown_and_duplicate_schedule_prevent_second_raise(self) -> None:
         coordinator, _, _, client, _ = _coordinator(self.database, cooldown=FixedRaiseCooldown(timedelta(hours=1)))
         first = coordinator.run("scheduled-6", now=NOW)
         second = coordinator.run("scheduled-6", now=NOW + timedelta(minutes=1))
         third = coordinator.run("scheduled-7", now=NOW + timedelta(minutes=2))
-        self.assertEqual([item.status for item in first.families], [RaiseResultStatus.COMPLETED, RaiseResultStatus.COMPLETED])
-        self.assertEqual([item.status for item in second.families], [RaiseResultStatus.DUPLICATE, RaiseResultStatus.DUPLICATE])
-        self.assertEqual([item.status for item in third.families], [RaiseResultStatus.COOLDOWN, RaiseResultStatus.COOLDOWN])
-        self.assertEqual(len(client.calls), 2)
+        self.assertEqual([item.status for item in first.families], [RaiseResultStatus.COMPLETED])
+        self.assertEqual([item.status for item in second.families], [RaiseResultStatus.DUPLICATE])
+        self.assertEqual([item.status for item in third.families], [RaiseResultStatus.COOLDOWN])
+        self.assertEqual(len(client.calls), 1)
 
 
 def _coordinator(
@@ -122,20 +121,18 @@ def _coordinator(
     outcome: LotWriteOutcome = LotWriteOutcome.SUCCEEDED, cooldown: FixedRaiseCooldown | None = None,
 ):
     lots = (
-        ManagedPriceLot("mplus-lot", SellerFamily.MYTHIC_PLUS, _state("mplus")),
-        ManagedPriceLot("delve-lot", SellerFamily.DELVES, _state("delve")),
+        ManagedPriceLot("mplus-lot", SellerFamily.MYTHIC_PLUS, _state("mplus"), True),
     )
-    source = MockCompetitorObservationAdapter(_records("mplus", "a", "b") + _records("delve", "c", "d"))
+    source = MockCompetitorObservationAdapter(_records("mplus", "a", "b"))
     own_prices = MockOwnLotPriceAdapter(
-        {"mplus-lot": 11_000, "delve-lot": 11_000},
+        {"mplus-lot": 11_000},
         stale_write_attempts={"mplus-lot": stale_mplus} if stale_mplus else {},
     )
     sellers = (
         _seller("a", SellerFamily.MYTHIC_PLUS), _seller("b", SellerFamily.MYTHIC_PLUS),
-        _seller("c", SellerFamily.DELVES), _seller("d", SellerFamily.DELVES),
     )
-    mappings = tuple(_mapping(seller_id, service) for seller_id, service in (("a", "mplus"), ("b", "mplus"), ("c", "delve"), ("d", "delve")))
-    policies = {service: PricePolicy(hard_floor=1_000, price_step_minor=100, currency="RUB") for service in ("mplus", "delve")}
+    mappings = tuple(_mapping(seller_id, "mplus") for seller_id in ("a", "b"))
+    policies = {"mplus": PricePolicy(hard_floor=1_000, price_step_minor=100, currency="RUB")}
     snapshots = PriceSnapshotRepository(database)
     prices = PriceUpdateCoordinator(
         observation_adapter=source, own_price_adapter=own_prices, safety_engine=SafetyValidatedPricingEngine(),

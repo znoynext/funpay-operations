@@ -1,4 +1,4 @@
-"""Independent, serializable service models with stable internal codes.
+"""Serializable Mythic+ service models with stable internal codes.
 
 These models deliberately describe an offer only. They do not create or change
 FunPay lots and have no network or persistence dependency.
@@ -124,76 +124,7 @@ class MythicPlusService:
         return cls.from_dict(_json_object(payload))
 
 
-@dataclass(frozen=True)
-class DelveService:
-    """A Delve service, either ordinary or Bountiful, for one run or a package."""
-
-    tier: int
-    bountiful: bool
-    region: Region
-    service_format: ServiceFormat
-    runs: int = 1
-    price_conditions: Mapping[str, str] | tuple[tuple[str, str], ...] = ()
-
-    def __post_init__(self) -> None:
-        if isinstance(self.tier, bool) or not isinstance(self.tier, int) or not 1 <= self.tier <= 11:
-            raise ValueError("tier must be an integer from 1 to 11")
-        if not isinstance(self.bountiful, bool):
-            raise ValueError("bountiful must be a boolean")
-        _validated_enum(self.region, Region, "region")
-        _validated_enum(self.service_format, ServiceFormat, "service_format")
-        object.__setattr__(self, "runs", _validated_package_runs(self.runs))
-        object.__setattr__(self, "price_conditions", _validated_conditions(self.price_conditions))
-
-    @property
-    def code(self) -> str:
-        bountiful = "_bountiful" if self.bountiful else ""
-        return f"delve_t{self.tier}{bountiful}_{self.service_format.value}_x{self.runs}"
-
-    @property
-    def is_package(self) -> bool:
-        return self.runs > 1
-
-    @property
-    def deduplication_key(self) -> str:
-        conditions = ",".join(f"{name}={value}" for name, value in self.price_conditions)
-        return f"{self.code}|{self.region.value}|{conditions}"
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "kind": "delve",
-            "tier": self.tier,
-            "bountiful": self.bountiful,
-            "region": self.region.value,
-            "service_format": self.service_format.value,
-            "runs": self.runs,
-            "price_conditions": dict(self.price_conditions),
-            "code": self.code,
-        }
-
-    def to_json(self) -> str:
-        return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "DelveService":
-        if payload.get("kind") != "delve":
-            raise ValueError("payload is not a Delve service")
-        service = cls(
-            tier=payload.get("tier"),
-            bountiful=payload.get("bountiful"),
-            region=Region(payload.get("region")),
-            service_format=ServiceFormat(payload.get("service_format")),
-            runs=payload.get("runs", 1),
-            price_conditions=payload.get("price_conditions", {}),
-        )
-        return _verified_code(payload, service)
-
-    @classmethod
-    def from_json(cls, payload: str) -> "DelveService":
-        return cls.from_dict(_json_object(payload))
-
-
-ServiceModel = MythicPlusService | DelveService
+ServiceModel = MythicPlusService
 TService = TypeVar("TService", bound=ServiceModel)
 
 

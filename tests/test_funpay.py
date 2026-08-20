@@ -10,11 +10,12 @@ from funpay_operations.config import Settings
 from funpay_operations.funpay import (
     DisabledFunPayReplyClient,
     FunPayBumpMetadata,
+    FunPayNetworkUnavailable,
     FunPayProfile,
-    FunPayProtocolError,
     FunPaySessionExpired,
     MockFunPayClient,
     NativeFunPayClient,
+    RealOperationsDisabled,
     build_read_client,
     build_reply_client,
 )
@@ -119,6 +120,10 @@ class FpxAuthError(Exception):
     pass
 
 
+class FpxRequestError(Exception):
+    pass
+
+
 class FailingTools(FakeTools):
     def __init__(self) -> None:
         super().__init__()
@@ -126,6 +131,15 @@ class FailingTools(FakeTools):
 
     async def fail(self) -> object:
         raise FpxAuthError("invalid cookies")
+
+
+class OfflineTools(FakeTools):
+    def __init__(self) -> None:
+        super().__init__()
+        self.account.profile.get_user_data = self.fail  # type: ignore[method-assign]
+
+    async def fail(self) -> object:
+        raise FpxRequestError("request timeout")
 
 
 class FunPayClientTests(unittest.TestCase):
@@ -157,6 +171,8 @@ class FunPayClientTests(unittest.TestCase):
         self.assertEqual(lot_details.editor_options, {"price": (), "fields[type]": (("Run", "run"),)})
         self.assertEqual(lot_details.omitted_field_names, ("fields[payment_msg][ru]", "secrets"))
         self.assertEqual(client.get_seller_lots("42")[0].seller_id, "42")
+        public = client.get_seller_lot_details("42")[0]
+        self.assertEqual((public.category_node_id, public.description, public.editor_fields), ("20", "Description", {}))
         dialog = client.get_dialogs()[0]
         self.assertEqual((dialog.dialog_id, dialog.counterparty_id, dialog.counterparty_name), ("100", "88", "Buyer"))
         messages = client.get_new_messages()
@@ -213,6 +229,7 @@ class FunPayClientTests(unittest.TestCase):
         mock = MockFunPayClient(profile=FunPayProfile("mock", "tester", True), bump_metadata={"1": FunPayBumpMetadata("1", ("2",))})
         self.assertTrue(mock.check_authorization())
         self.assertEqual(mock.get_seller_lots("other"), ())
+        self.assertEqual(mock.get_seller_lot_details("other"), ())
         self.assertEqual(mock.get_own_lot_details(), ())
         self.assertTrue(mock.check_bump_availability("1"))
 
@@ -224,3 +241,41 @@ class FunPayClientTests(unittest.TestCase):
         client = build_read_client(settings, SecretStore(Path("data") / "not-created.dpapi"))
         self.assertFalse(client.has_local_session())
         self.assertIsInstance(build_reply_client(settings, client), DisabledFunPayReplyClient)
+
+    def test_network_retry_budget_and_circuit_breaker_are_bounded(self) -> None:
+        sleeps: list[float] = []
+        created = 0
+
+        def factory(*_: str) -> OfflineTools:
+            nonlocal created
+            created += 1
+            return OfflineTools()
+
+        client = NativeFunPayClient(
+            lambda: json.dumps({"golden_key": "key", "golden_seal": "seal"}),
+            currency="RUB", allow_replies=False, tools_factory=factory,
+            max_attempts=2, retry_initial_seconds=1, retry_max_seconds=2,
+            circuit_failure_threshold=2, circuit_open_seconds=30,
+            monotonic=lambda: 10.0, sleeper=sleeps.append,
+        )
+        with self.assertRaises(FunPayNetworkUnavailable):
+            client.get_profile()
+        self.assertEqual((created, sleeps), (2, [1]))
+        with self.assertRaisesRegex(FunPayNetworkUnavailable, "circuit breaker"):
+            client.get_profile()
+        self.assertEqual(created, 2)
+
+    def test_production_read_client_never_inherits_reply_capability_from_live_config(self) -> None:
+        settings = Settings(
+            "test", "INFO", Path("data"), Path("data/app.sqlite3"), Path("data/logs"), Path("data/backups"),
+            "live", True, 1, 1, 2, "funpay_session", "telegram", (), "RUB", None,
+        )
+
+        class Store:
+            def get(self, key: str) -> str:
+                del key
+                return json.dumps({"golden_key": "key", "golden_seal": "seal"})
+
+        client = build_read_client(settings, Store())
+        with self.assertRaises(RealOperationsDisabled):
+            build_reply_client(settings, client).send_reply("dialog", "buyer", "text", "local-key")

@@ -83,6 +83,8 @@ class LotWriteTests(unittest.TestCase):
             NativeLotWriteClient(
                 read, operation_mode=mode, live_session_available=lambda: session,
                 live_execution_enabled=live_execution_enabled,
+                managed_lot_guard=lambda lot_id: lot_id == "lot",
+                create_guard=lambda node_id, fields: node_id == "node" and bool(fields),
             ),
             read,
         )
@@ -105,8 +107,8 @@ class LotWriteTests(unittest.TestCase):
         supported, _ = self.client("safe", session=True)
         self.assertEqual(unavailable.capabilities()[LotWriteCapability.UPDATE_PRICE].state, CapabilityState.UNAVAILABLE_WITHOUT_LIVE_SESSION)
         self.assertEqual(unavailable.capabilities()[LotWriteCapability.UPDATE_FIELDS].state, CapabilityState.UNSUPPORTED)
-        self.assertEqual(supported.capabilities()[LotWriteCapability.BUMP_RAISE].state, CapabilityState.SUPPORTED)
-        self.assertIn("all owned", supported.capabilities()[LotWriteCapability.BUMP_RAISE].detail)
+        self.assertEqual(supported.capabilities()[LotWriteCapability.BUMP_RAISE].state, CapabilityState.UNSUPPORTED)
+        self.assertIn("account-wide", supported.capabilities()[LotWriteCapability.BUMP_RAISE].detail)
 
     def test_unsupported_generic_field_update_is_reported(self) -> None:
         client, read = self.client("dry_run")
@@ -136,6 +138,8 @@ class LotWriteTests(unittest.TestCase):
             client.update_fields("lot", {"secrets": "no"})
         with self.assertRaises(LotWriteValidationError):
             client.create_lot("node", {"price": "1"})
+        with self.assertRaises(LotWriteValidationError):
+            client.update_price("non-managed", "12")
 
     def test_live_is_architecturally_ready_but_hard_blocked(self) -> None:
         client, read = self.client("live", live_execution_enabled=False)
@@ -150,8 +154,8 @@ class LotWriteTests(unittest.TestCase):
         bump = client.bump_raise()
         self.assertEqual(price.outcome, LotWriteOutcome.SUCCEEDED)
         self.assertEqual(enable.outcome, LotWriteOutcome.VERIFICATION_REQUIRED)
-        self.assertEqual(bump.outcome, LotWriteOutcome.VERIFICATION_REQUIRED)
-        self.assertEqual(read.run_calls, 3)
+        self.assertEqual(bump.outcome, LotWriteOutcome.UNSUPPORTED)
+        self.assertEqual(read.run_calls, 2)
 
     def test_mock_success_and_failure_are_deterministic(self) -> None:
         success = MockLotWriteClient()

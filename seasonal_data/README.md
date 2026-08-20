@@ -11,6 +11,6 @@ description preview from `unconfirmed` or `superseded` data. Empty starter
 records therefore remain safe to publish and cannot make claims about live
 rewards.
 
-For confirmed Mythic+ records, reward and crest keys must use `key_<level>`;
-for Delves they must use `tier_<tier>`. The preview generator selects only the
-requested key level or tier and refuses stale records or missing exact values.
+For confirmed Mythic+ records, reward and crest keys must use `key_<level>`.
+The preview generator selects only the requested key level and refuses stale
+records or missing exact values.

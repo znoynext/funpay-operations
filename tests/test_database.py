@@ -31,7 +31,7 @@ class DatabaseTests(unittest.TestCase):
         with self.database.session() as connection:
             connection.execute("INSERT INTO lots (external_id, title, price_minor, currency) VALUES (?, ?, ?, ?)", ("legacy", "Legacy", 1, "RUB"))
         self.database.apply_migrations()
-        self.assertEqual(self.database.applied_migrations(), (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11))
+        self.assertEqual(self.database.applied_migrations(), (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12))
         with self.database.session() as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM lots").fetchone()[0], 1)
 
@@ -42,6 +42,32 @@ class DatabaseTests(unittest.TestCase):
                 raise RuntimeError("simulated failure")
         with self.database.session() as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM trusted_sellers").fetchone()[0], 0)
+
+    def test_existing_database_is_integrity_checked_and_backed_up_before_migration(self) -> None:
+        root = Path(self.temporary_directory.name) / "migration-copy"
+        database = Database(root / "data" / "state.sqlite3")
+        database.initialize()
+        with database.session() as connection:
+            connection.execute(
+                "INSERT INTO lots (external_id, title, price_minor, currency) VALUES ('kept', 'Kept', 1, 'RUB')"
+            )
+            connection.execute("DROP INDEX idx_read_only_observations_service")
+            connection.execute("DROP TABLE read_only_price_observations")
+            connection.execute("DROP TABLE lot_control_settings")
+            connection.execute("DELETE FROM schema_migrations WHERE version = 12")
+
+        database.initialize()
+
+        backups = tuple((root / "backups").glob("state.pre-migration.*.sqlite3"))
+        self.assertEqual(len(backups), 1)
+        copy = sqlite3.connect(backups[0])
+        try:
+            self.assertEqual(copy.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+            self.assertEqual(copy.execute("SELECT COUNT(*) FROM lots WHERE external_id = 'kept'").fetchone()[0], 1)
+        finally:
+            copy.close()
+        self.assertEqual(database.applied_migrations()[-1], 12)
+        database.check_integrity()
 
     def test_repositories_prevent_duplicate_events_messages_and_snapshots(self) -> None:
         seller_id = TrustedSellerRepository(self.database).upsert("seller-1", "trusted")

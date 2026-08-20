@@ -129,6 +129,8 @@ class NativeLotWriteClient:
         operation_mode: str,
         live_session_available: Callable[[], bool] | None = None,
         live_execution_enabled: bool = False,
+        managed_lot_guard: Callable[[str], bool] | None = None,
+        create_guard: Callable[[str, Mapping[str, str]], bool] | None = None,
     ) -> None:
         if operation_mode not in {"safe", "dry_run", "live"}:
             raise ValueError("operation_mode must be safe, dry_run, or live")
@@ -136,23 +138,25 @@ class NativeLotWriteClient:
         self._operation_mode = operation_mode
         self._live_session_available = live_session_available or (lambda: False)
         self._live_execution_enabled = live_execution_enabled
+        self._managed_lot_guard = managed_lot_guard or (lambda _lot_id: False)
+        self._create_guard = create_guard or (lambda _node_id, _fields: False)
         self._seen_operation_keys: set[str] = set()
 
     def capabilities(self) -> Mapping[LotWriteCapability, Capability]:
         session_available = self._live_session_available()
         result: dict[LotWriteCapability, Capability] = {}
         for capability, method in _FPX_METHODS.items():
-            if method is None:
+            if capability is LotWriteCapability.BUMP_RAISE:
+                result[capability] = Capability(
+                    capability, CapabilityState.UNSUPPORTED,
+                    "fpx raise is account-wide and cannot enforce the Mythic+-only mutation boundary",
+                )
+            elif method is None:
                 result[capability] = Capability(capability, CapabilityState.UNSUPPORTED, "fpx has no public generic operation")
             elif not session_available:
                 result[capability] = Capability(
                     capability, CapabilityState.UNAVAILABLE_WITHOUT_LIVE_SESSION,
                     "a live local FunPay session is required for execution",
-                )
-            elif capability is LotWriteCapability.BUMP_RAISE:
-                result[capability] = Capability(
-                    capability, CapabilityState.SUPPORTED,
-                    "fpx raises all owned lot categories; targeted per-lot raise is unavailable",
                 )
             else:
                 result[capability] = Capability(capability, CapabilityState.SUPPORTED, f"fpx public method: {method}")
@@ -160,6 +164,7 @@ class NativeLotWriteClient:
 
     def update_price(self, lot_id: str, price: str, *, operation_key: str | None = None) -> LotWriteResult:
         normalized_lot_id = _required_text(lot_id, "lot_id")
+        self._require_managed_lot(normalized_lot_id)
         normalized_price = _price(price)
         return self._dispatch(
             LotWriteCapability.UPDATE_PRICE, {"lot_id": normalized_lot_id, "price": normalized_price}, operation_key,
@@ -169,6 +174,7 @@ class NativeLotWriteClient:
 
     def update_title(self, lot_id: str, title_ru: str, title_en: str, *, operation_key: str | None = None) -> LotWriteResult:
         normalized_lot_id = _required_text(lot_id, "lot_id")
+        self._require_managed_lot(normalized_lot_id)
         ru, en = _required_text(title_ru, "title_ru"), _required_text(title_en, "title_en")
         return self._dispatch(
             LotWriteCapability.UPDATE_TITLE, {"lot_id": normalized_lot_id, "title_ru": ru, "title_en": en}, operation_key,
@@ -178,6 +184,7 @@ class NativeLotWriteClient:
 
     def update_description(self, lot_id: str, description_ru: str, description_en: str, *, operation_key: str | None = None) -> LotWriteResult:
         normalized_lot_id = _required_text(lot_id, "lot_id")
+        self._require_managed_lot(normalized_lot_id)
         ru, en = _required_text(description_ru, "description_ru"), _required_text(description_en, "description_en")
         return self._dispatch(
             LotWriteCapability.UPDATE_DESCRIPTION,
@@ -188,6 +195,7 @@ class NativeLotWriteClient:
 
     def update_fields(self, lot_id: str, fields: Mapping[str, str], *, operation_key: str | None = None) -> LotWriteResult:
         normalized_lot_id = _required_text(lot_id, "lot_id")
+        self._require_managed_lot(normalized_lot_id)
         normalized_fields = _fields(fields)
         return self._dispatch(
             LotWriteCapability.UPDATE_FIELDS, {"lot_id": normalized_lot_id, "fields": normalized_fields}, operation_key,
@@ -196,6 +204,7 @@ class NativeLotWriteClient:
 
     def enable_lot(self, lot_id: str, *, operation_key: str | None = None) -> LotWriteResult:
         normalized_lot_id = _required_text(lot_id, "lot_id")
+        self._require_managed_lot(normalized_lot_id)
         return self._dispatch(
             LotWriteCapability.ENABLE_LOT, {"lot_id": normalized_lot_id}, operation_key, verify=True,
             invoke=lambda tools: tools.account.editor.toggle_on_lot(normalized_lot_id),
@@ -203,6 +212,7 @@ class NativeLotWriteClient:
 
     def disable_lot(self, lot_id: str, *, operation_key: str | None = None) -> LotWriteResult:
         normalized_lot_id = _required_text(lot_id, "lot_id")
+        self._require_managed_lot(normalized_lot_id)
         return self._dispatch(
             LotWriteCapability.DISABLE_LOT, {"lot_id": normalized_lot_id}, operation_key, verify=True,
             invoke=lambda tools: tools.account.editor.toggle_off_lot(normalized_lot_id),
@@ -211,6 +221,8 @@ class NativeLotWriteClient:
     def create_lot(self, node_id: str, fields: Mapping[str, str], *, operation_key: str | None = None) -> LotWriteResult:
         normalized_node_id = _required_text(node_id, "node_id")
         normalized_fields = _fields(fields)
+        if not self._create_guard(normalized_node_id, normalized_fields):
+            raise LotWriteValidationError("create_lot requires a confirmed Mythic+ service identity")
         required_create_fields = {"price", "amount", "fields[summary][ru]", "fields[summary][en]"}
         if not required_create_fields.issubset(normalized_fields):
             raise LotWriteValidationError("create_lot requires price, amount, and both title fields")
@@ -220,9 +232,9 @@ class NativeLotWriteClient:
             available = {field.key for field in editor.fields}
             if not set(normalized_fields).issubset(available):
                 raise LotWriteValidationError("create_lot includes fields unavailable for this node")
-            for field in editor.fields:
-                if field.key in normalized_fields:
-                    field.value = normalized_fields[field.key]
+            for lot_field in editor.fields:
+                if lot_field.key in normalized_fields:
+                    lot_field.value = normalized_fields[lot_field.key]
             return await tools.account.lot.create_lot(editor)
 
         return self._dispatch(
@@ -235,6 +247,10 @@ class NativeLotWriteClient:
             LotWriteCapability.BUMP_RAISE, {}, operation_key, verify=True,
             invoke=lambda tools: tools.account.lot.raise_lots(),
         )
+
+    def _require_managed_lot(self, lot_id: str) -> None:
+        if not self._managed_lot_guard(lot_id):
+            raise LotWriteValidationError("lot mutation requires a confirmed Mythic+ identity")
 
     def _dispatch(
         self,

@@ -3,7 +3,6 @@ from __future__ import annotations
 import unittest
 
 from funpay_operations.price_safety import (
-    BatchSafetyDecision,
     MarketConsensusDecision,
     MarketConsensusEngine,
     PriceObservationRecord,

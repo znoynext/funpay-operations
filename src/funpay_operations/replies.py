@@ -39,6 +39,8 @@ class FunPayReplyRouter:
             target = self._replies.consume_mode(update.user_id, update.chat_id, int(self._clock()))
         if target is None:
             return None
+        if not self._outbound_allowed("outbound_reply"):
+            return CommandReply("🔒 Ответы в FunPay пока не разрешены.")
         attempt = self._replies.create_attempt(update.update_id, update.user_id, update.chat_id, target, update.text)
         if attempt.state == "sent":
             return CommandReply("Ответ уже был отправлен.")
@@ -52,6 +54,8 @@ class FunPayReplyRouter:
             return None
         identifier = int(raw_id)
         if action == "funpay_reply":
+            if not self._outbound_allowed("outbound_reply"):
+                return CommandReply("🔒 Ответ будет включён после отдельного теста отправки.")
             target = self._links.target_for_dialog(update.chat_id, identifier)
             if target is None:
                 return CommandReply("Диалог или покупатель не подтверждены.")

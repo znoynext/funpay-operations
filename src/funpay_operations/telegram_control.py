@@ -36,7 +36,7 @@ from .telegram_views import (
 
 CONTROL_MENU = {
     "keyboard": [
-        ["⚔️ Mythic+", "🕳 Delves"],
+        ["⚔️ Mythic+"],
         ["💰 Цены", "💬 Сообщения"],
         ["👥 Продавцы", "📦 Лоты"],
         ["🔄 Обновить и поднять"],
@@ -81,6 +81,7 @@ class MockControlService:
     calls: list[tuple[str, str | None]] = field(default_factory=list)
     _lots: dict[str, LotView] = field(default_factory=dict)
     _sellers: list[TrustedSellerView] = field(default_factory=list)
+    external_mutations_allowed: bool = True
 
     def __post_init__(self) -> None:
         if not self._lots:
@@ -97,18 +98,11 @@ class MockControlService:
                     (ReferencePriceView("Seller A", 210_000),), "Fixed price: 2100 ₽",
                     technical_detail="FunPay lot ID: mock-m12\nService code: hidden from the normal UI",
                 ),
-                "d8": LotView(
-                    "d8", "Delves", "Bountiful Delve Tier 8", ("EU", "Self-play", "x1"), 99_000,
-                    "paused", 80_000, (), "Цена не меняется, пока лот приостановлен.",
-                    "Для расчёта нужен подтверждённый ориентир.",
-                    "FunPay lot ID: mock-d8\nService code: hidden from the normal UI",
-                ),
             }
         if not self._sellers:
             self._sellers = [
                 TrustedSellerView("SellerOne", "Mythic+", True, True),
                 TrustedSellerView("SellerTwo", "Mythic+", True, True),
-                TrustedSellerView("SellerThree", "Delves", True, True),
             ]
 
     def execute(self, action: str, payload: str | None = None) -> str:
@@ -123,8 +117,10 @@ class MockControlService:
             key, _, amount = payload.partition(":")
             if key in self._lots and amount.isdecimal() and int(amount) > 0:
                 self._lots[key] = replace(self._lots[key], hard_floor_minor=int(amount) * 100)
-        if action == "seller_add" and payload and not any(item.nickname.casefold() == payload.casefold() for item in self._sellers):
-            self._sellers.append(TrustedSellerView(payload, "Mythic+", True, True))
+        if action == "seller_add" and payload:
+            nickname = payload
+            if not any(item.nickname.casefold() == nickname.casefold() for item in self._sellers):
+                self._sellers.append(TrustedSellerView(nickname, "Mythic+", True, True))
         if action == "seller_remove" and payload:
             self._sellers = [item for item in self._sellers if item.nickname != payload]
         if action == "seller_disable" and payload:
@@ -141,7 +137,7 @@ class MockControlService:
                 _status("Telegram", "⚪ Mock mode"), _status("Automation", "🟡 Safe mode"),
                 _status("Emergency stop", "🔴 Активен" if emergency_active else "🟢 Не активен"),
             ),
-            sum(item.family == "Mythic+" for item in lots), sum(item.family == "Delves" for item in lots),
+            sum(item.family == "Mythic+" for item in lots),
             sum(item.warning is not None for item in lots), "Пока не выполнялось", "Пока не выполнялся", "Неизвестно",
         )
 
@@ -230,7 +226,6 @@ class TelegramControlRouter:
 
     _TEXT_ACTIONS = {
         "⚔️ mythic+": _Intent("family", "Mythic+"), "mythic+": _Intent("family", "Mythic+"),
-        "🕳 delves": _Intent("family", "Delves"), "delves": _Intent("family", "Delves"),
         "💰 цены": _Intent("prices"), "💬 сообщения": _Intent("messages"),
         "👥 продавцы": _Intent("sellers"), "trusted sellers": _Intent("sellers"),
         "📦 лоты": _Intent("lots"), "🔄 обновить и поднять": _Intent("update_raise_preview"),
@@ -312,7 +307,8 @@ class TelegramControlRouter:
                     [("Попробовать снова", _Intent("seller_add_input")), ("Назад", _Intent("sellers"))],
                 ])
             return self._render(user_id, seller_candidate_text(candidate), [
-                [("✅ Добавить", _Intent("confirm", f"seller_add:{candidate.nickname}")), ("❌ Отмена", _Intent("sellers"))],
+                [("Добавить для Mythic+", _Intent("confirm", f"seller_add:{candidate.nickname}"))],
+                [("❌ Отмена", _Intent("sellers"))],
             ])
         if mode in {"fixed_price", "hard_floor"} and payload:
             if not 1 <= len(text) <= 8 or not text.isdecimal() or not 1 <= int(text) <= 10_000_000:
@@ -374,9 +370,15 @@ class TelegramControlRouter:
         if action == "catalog":
             return self._simple_screen(user_id, "📚 Service catalog\n\nКаталог настраивается локально. Здесь будут показаны человекочитаемые услуги и шаблоны.", _Intent("settings"), edit=edit)
         if action == "diagnostics":
-            return self._simple_screen(user_id, "🩺 Диагностика\n\nMock mode готов. FunPay и Telegram secrets пока не настроены.", _Intent("settings"), edit=edit)
+            return self._simple_screen(user_id, "🩺 Диагностика\n\nСостояние подключений показано на главном экране.", _Intent("settings"), edit=edit)
         if action == "about":
-            return self._simple_screen(user_id, "ℹ️ FunPay Bot\n\nПанель работает в mock mode. Live writes не разрешены.", _Intent("settings"), edit=edit)
+            return self._simple_screen(
+                user_id,
+                "ℹ️ FunPay Operations for World of Warcraft Mythic+\n\n"
+                "Production read-only режим. Изменения FunPay не разрешены.",
+                _Intent("settings"),
+                edit=edit,
+            )
         if action == "pause":
             self.states.save("operations", "paused")
             self._run("pause")
@@ -384,6 +386,12 @@ class TelegramControlRouter:
         if action == "resume_preview":
             return self._confirm_screen(user_id, "resume", "▶️ Возобновить", "Автоматизация снова сможет планировать разрешённые действия.", edit=edit)
         if action == "auto_reply_toggle":
+            if not self._writes_available():
+                self.states.save("funpay_auto_reply", "disabled")
+                return self._simple_screen(
+                    user_id, "🔒 Автоответ пока заблокирован. Реальные сообщения в FunPay не отправляются.",
+                    _Intent("settings"), edit=edit,
+                )
             current = self.states.load("funpay_auto_reply")
             enabled = not bool(current and current[0] == "enabled")
             self.states.save("funpay_auto_reply", "enabled" if enabled else "disabled")
@@ -419,7 +427,7 @@ class TelegramControlRouter:
         if action == "cancel":
             return self._home(user_id, edit=edit, notice="Операция отменена.")
         if action == "refresh":
-            return self._home(user_id, edit=edit)
+            return self._run_readonly(user_id, "refresh", "Данные FunPay обновлены.", edit=edit)
         return self._stale(user_id)
 
     def _home(self, user_id: int, *, edit: bool, notice: str | None = None) -> CommandReply:
@@ -427,38 +435,46 @@ class TelegramControlRouter:
         if notice:
             text = f"{notice}\n\n{text}"
         rows = [
-            [("⚔️ Mythic+", _Intent("family", "Mythic+")), ("🕳 Delves", _Intent("family", "Delves"))],
+            [("⚔️ Mythic+", _Intent("family", "Mythic+"))],
             [("💰 Цены", _Intent("prices")), ("💬 Сообщения", _Intent("messages"))],
             [("👥 Продавцы", _Intent("sellers")), ("📦 Лоты", _Intent("lots"))],
-            [("🔄 Обновить и поднять", _Intent("update_raise_preview"))],
             [("⚙️ Настройки", _Intent("settings"))],
         ]
+        if self._writes_available():
+            rows.insert(3, [("🔄 Обновить и поднять", _Intent("update_raise_preview"))])
         if self.gate.active():
             rows.append([("▶️ Возобновить", _Intent("resume_preview"))])
         return self._render(user_id, text, rows, edit=edit)
 
     def _family_screen(self, user_id: int, family: str, *, edit: bool) -> CommandReply:
-        return self._render(user_id, family_text(self.services.family(family)), [
+        rows = [
             [("📦 Лоты", _Intent("family_lots", family)), ("💰 Проверить цены", _Intent("check_prices"))],
-            [("💸 Обновить цены", _Intent("price_preview")), ("🔄 Обновить и поднять", _Intent("update_raise_preview"))],
             [("⚙️ Настройки family", _Intent("settings"))],
             _nav(),
-        ], edit=edit)
+        ]
+        if self._writes_available():
+            rows.insert(1, [("💸 Обновить цены", _Intent("price_preview")), ("🔄 Обновить и поднять", _Intent("update_raise_preview"))])
+        return self._render(user_id, family_text(self.services.family(family)), rows, edit=edit)
 
     def _lots_screen(self, user_id: int, family: str | None, *, edit: bool) -> CommandReply:
         lots = self.services.lots(family)
         heading = f"📦 Лоты — {family}" if family else "📦 Лоты"
         rows = [[(item.title, _Intent("lot", item.key))] for item in lots]
-        if not rows:
-            rows.append([("Обновить", _Intent("refresh"))])
+        rows.append([("🔄 Обновить данные", _Intent("refresh"))])
         rows.append(_nav(_Intent("family", family) if family else _Intent("home")))
         return self._render(user_id, f"{heading}\n\nВыберите лот, чтобы посмотреть цену, режим и решение.", rows, edit=edit)
 
     def _lot_screen(self, user_id: int, key: str, *, edit: bool = True) -> CommandReply:
         lot = self._lot(key)
+        if not lot.managed:
+            return self._render(user_id, lot_text(lot), [
+                [("Подробнее", _Intent("lot_detail", key))],
+                _nav(_Intent("lots")),
+            ], edit=edit)
         return self._render(user_id, lot_text(lot), [
-            [("Режим", _Intent("lot_mode", key)), ("Fixed price", _Intent("lot_input", f"fixed_price:{key}"))],
-            [("Hard floor", _Intent("lot_input", f"hard_floor:{key}")), ("Проверить сейчас", _Intent("lot_check", key))],
+            [("Режим (локально)", _Intent("lot_mode", key)), ("Fixed price (локально)", _Intent("lot_input", f"fixed_price:{key}"))],
+            [("Минимальная цена", _Intent("lot_input", f"hard_floor:{key}")), ("Сбросить минимум", _Intent("lot_clear_floor", key))],
+            [("Проверить сейчас", _Intent("lot_check", key))],
             [("Решение по цене", _Intent("lot_decision", key)), ("Подробнее", _Intent("lot_detail", key))],
             [("▶️ Resume" if lot.mode == "paused" else "⏸ Pause", _Intent("lot_automatic" if lot.mode == "paused" else "lot_paused", key))],
             _nav(_Intent("family_lots", lot.family)),
@@ -466,23 +482,28 @@ class TelegramControlRouter:
 
     def _lot_mode_screen(self, user_id: int, key: str, *, edit: bool) -> CommandReply:
         return self._render(user_id, "Выберите режим лота. Изменение будет применено только к этому лоту.", [
-            [("🟢 Automatic", _Intent("lot_automatic", key)), ("🔵 Fixed price", _Intent("lot_fixed_price", key))],
-            [("⏸ Paused", _Intent("lot_paused", key)), ("🟡 Check only", _Intent("lot_check_only", key))],
+            [("🟢 Automatic (локально)", _Intent("lot_automatic", key)),
+             ("🔵 Fixed price (локально)", _Intent("lot_input", f"fixed_price:{key}"))],
+            [("⏸ Paused (локально)", _Intent("lot_paused", key)),
+             ("🟡 Check only", _Intent("lot_check_only", key))],
             _nav(_Intent("lot", key)),
         ], edit=edit)
 
     def _prices_screen(self, user_id: int, *, edit: bool) -> CommandReply:
-        return self._render(user_id, price_overview_text(self.services.price_overview()), [
-            [("Проверить сейчас", _Intent("check_prices")), ("Обновить цены", _Intent("price_preview"))],
-            [("Решения по лотам", _Intent("lots")), ("Rollback", _Intent("rollback_preview"))],
-            _nav(),
-        ], edit=edit)
+        rows = [[("Проверить сейчас", _Intent("check_prices")), ("Решения по лотам", _Intent("lots"))]]
+        if self._writes_available():
+            rows.extend([
+                [("Обновить цены", _Intent("price_preview")), ("Rollback", _Intent("rollback_preview"))],
+            ])
+        rows.append(_nav())
+        return self._render(user_id, price_overview_text(self.services.price_overview()), rows, edit=edit)
 
     def _price_preview_screen(self, user_id: int, *, edit: bool) -> CommandReply:
-        return self._render(user_id, price_preview_text(self.services.price_preview()), [
-            [("✅ Подтвердить", _Intent("confirm", "mass_price_update")), ("❌ Отмена", _Intent("cancel"))],
-            _nav(_Intent("prices")),
-        ], edit=edit)
+        rows = []
+        if self._writes_available():
+            rows.append([("✅ Подтвердить", _Intent("confirm", "mass_price_update")), ("❌ Отмена", _Intent("cancel"))])
+        rows.append(_nav(_Intent("prices")))
+        return self._render(user_id, price_preview_text(self.services.price_preview()), rows, edit=edit)
 
     def _sellers_screen(self, user_id: int, *, edit: bool) -> CommandReply:
         return self._render(user_id, sellers_text(self.services.sellers()), [
@@ -509,7 +530,9 @@ class TelegramControlRouter:
         return self._render(user_id, mappings_text(choices), rows, edit=edit)
 
     def _messages_screen(self, user_id: int, *, edit: bool) -> CommandReply:
-        return self._render(user_id, "💬 Сообщения\n\nНовые сообщения приходят отдельными компактными уведомлениями. Нажмите «Ответить» прямо под нужным уведомлением.", [
+        reply_hint = ("Нажмите «Ответить» прямо под нужным уведомлением." if self._writes_available()
+                      else "🔒 Ответы в FunPay пока заблокированы; входящие уведомления продолжают работать.")
+        return self._render(user_id, f"💬 Сообщения\n\nНовые сообщения приходят отдельными компактными уведомлениями. {reply_hint}", [
             [("🏠 Главная", _Intent("home"))],
         ], edit=edit)
 
@@ -517,7 +540,8 @@ class TelegramControlRouter:
         auto_reply = self.states.load("funpay_auto_reply")
         text = settings_text(bool(auto_reply and auto_reply[0] == "enabled"))
         return self._render(user_id, text, [
-            [("Автоматизация", _Intent("automation")), ("Автоответ", _Intent("auto_reply_toggle"))],
+            [("Автоматизация" if self._writes_available() else "Автоматизация 🔒", _Intent("automation")),
+             ("Автоответ" if self._writes_available() else "Автоответ 🔒", _Intent("auto_reply_toggle"))],
             [("Уведомления", _Intent("notifications")), ("Каталог услуг", _Intent("catalog"))],
             [("Минимальные цены", _Intent("lots")), ("Диагностика", _Intent("diagnostics"))],
             [("Информация о боте", _Intent("about"))],
@@ -526,6 +550,13 @@ class TelegramControlRouter:
         ], edit=edit)
 
     def _automation_screen(self, user_id: int, *, edit: bool) -> CommandReply:
+        if not self._writes_available():
+            return self._render(
+                user_id,
+                "⚙️ Автоматизация\n\n🔒 Внешние изменения FunPay отключены. Работают только чтение и локальные настройки.",
+                [_nav(_Intent("settings"))],
+                edit=edit,
+            )
         state = self.states.load("operations")
         paused = bool(state and state[0] == "paused")
         text = f"⚙️ Автоматизация\n\nСостояние: {'⏸ Приостановлена' if paused else '🟢 Готова'}"
@@ -573,6 +604,12 @@ class TelegramControlRouter:
             self._run("seller_remove", nickname)
             return self._sellers_screen(user_id, edit=edit)
         operation = _gate_operation(action)
+        if action in {"mass_price_update", "update_raise", "rollback", "mass_lot_sync", "disable_lots"} and not self._writes_available():
+            return self._render(
+                user_id, "🔒 Реальные изменения FunPay пока не разрешены.\n\n"
+                "Сначала будет отдельная проверка и подтверждение первого live-действия.",
+                [[("🏠 Главная", _Intent("home"))]], edit=edit,
+            )
         if not self.gate.permits(operation):
             return self._render(user_id, "🛑 Emergency stop блокирует это исходящее действие.", [[("🏠 Главная", _Intent("home"))]], edit=edit)
         labels = {
@@ -633,6 +670,9 @@ class TelegramControlRouter:
     def _new_token(self) -> str:
         self._next_token += 1
         return format(self._next_token, "x")
+
+    def _writes_available(self) -> bool:
+        return bool(getattr(self.services, "external_mutations_allowed", True))
 
 
 def _nav(back: _Intent | None = None) -> list[tuple[str, _Intent]]:

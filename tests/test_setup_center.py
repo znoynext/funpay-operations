@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import tempfile
+import types
 import unittest
 from unittest.mock import patch
 
@@ -150,6 +151,21 @@ class SetupCenterServiceTests(unittest.TestCase):
                 statuses = SetupCenterController(paths).statuses()
                 self.assertIn("⚪ Не настроен", dict((item.label, item.value) for item in statuses).values())
                 self.assertEqual(setup_center_main(["--smoke"]), 0)
+
+    def test_gui_runtime_smoke_initializes_tcl_without_opening_a_window(self) -> None:
+        calls: list[tuple[str, str]] = []
+        interpreter = types.SimpleNamespace(call=lambda *args: calls.append(args) or "8.6")
+        tkinter = types.ModuleType("tkinter")
+        tkinter.Tcl = lambda: interpreter
+
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch.dict("os.environ", {"LOCALAPPDATA": directory}, clear=False),
+                patch.dict("sys.modules", {"tkinter": tkinter}),
+            ):
+                self.assertEqual(setup_center_main(["--gui-runtime-smoke"]), 0)
+
+        self.assertEqual(calls, [("info", "patchlevel")])
 
     def test_session_expired_status_is_clear_and_has_no_cookie_detail(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

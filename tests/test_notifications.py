@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Mapping
 
 from funpay_operations.database import Database
-from funpay_operations.funpay import FunPayMessage, FunPayNetworkUnavailable
+from funpay_operations.funpay import FunPayMessage, FunPayNetworkUnavailable, FunPaySessionExpired
 from funpay_operations.notifications import FunPayMessageNotifier
 from funpay_operations.repositories import DialogRepository, TaskStateRepository, TelegramMessageLinkRepository
 
@@ -16,12 +16,15 @@ class FakeFunPayClient:
     def __init__(self, messages: tuple[FunPayMessage, ...] = ()) -> None:
         self.messages = messages
         self.raise_unavailable = False
+        self.raise_expired = False
         self.cursors: list[str | None] = []
 
     def get_new_messages(self, after_message_id: str | None = None) -> tuple[FunPayMessage, ...]:
         self.cursors.append(after_message_id)
         if self.raise_unavailable:
             raise FunPayNetworkUnavailable("offline")
+        if self.raise_expired:
+            raise FunPaySessionExpired("expired")
         return self.messages
 
 
@@ -111,3 +114,28 @@ class NotificationTests(unittest.TestCase):
             TaskStateRepository(self.database).load("funpay_message_notifications"),
             ("running", '{"dialog-c":"m-4"}'),
         )
+
+    def test_production_bootstrap_persists_cursor_without_spamming_history(self) -> None:
+        notifier = FunPayMessageNotifier(
+            self.funpay, self.sender, DialogRepository(self.database), TelegramMessageLinkRepository(self.database),
+            TaskStateRepository(self.database), 1001, self.logger,
+            bootstrap_existing_messages=True, outbound_replies_enabled=False,
+        )
+        self.funpay.messages = (self.message("historical", "dialog-history"),)
+        notifier.sync()
+        self.assertEqual(self.sender.sent, [])
+        self.assertEqual(
+            TaskStateRepository(self.database).load("funpay_message_notifications"),
+            ("running", '{"dialog-history":"historical"}'),
+        )
+
+        self.funpay.messages = (self.message("new", "dialog-history"),)
+        notifier.sync()
+        self.assertEqual(len(self.sender.sent), 1)
+        markup = self.sender.sent[0][2]["inline_keyboard"]
+        self.assertEqual(markup[0][0]["text"], "Ответить 🔒")
+
+    def test_expired_session_reaches_background_session_guard(self) -> None:
+        self.funpay.raise_expired = True
+        with self.assertRaises(FunPaySessionExpired):
+            self.notifier.sync()
