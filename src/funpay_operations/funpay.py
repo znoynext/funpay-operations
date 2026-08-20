@@ -32,6 +32,14 @@ class FunPayNetworkUnavailable(FunPayError):
     """FunPay could not be reached after the library's bounded retry policy."""
 
 
+class FunPayRateLimited(FunPayNetworkUnavailable):
+    """FunPay returned a rate-limit signal; callers must stop without retrying."""
+
+
+class FunPayAccessDenied(FunPayNetworkUnavailable):
+    """FunPay denied the read; callers must stop without retrying."""
+
+
 class FunPayProtocolError(FunPayError):
     """The library could not normalize a FunPay response safely."""
 
@@ -456,7 +464,7 @@ class NativeFunPayClient:
                 else:
                     self._consecutive_failures = 0
                     return result
-                if isinstance(mapped, FunPaySessionExpired):
+                if isinstance(mapped, (FunPaySessionExpired, FunPayRateLimited, FunPayAccessDenied)):
                     raise mapped
                 self._consecutive_failures += 1
                 if self._consecutive_failures >= self._circuit_failure_threshold:
@@ -791,8 +799,12 @@ def _map_library_error(error: BaseException) -> FunPayError:
     message = str(error).lower()
     if "auth" in name or any(marker in message for marker in ("сесси", "cookie", "авториз", "invalid cookie")):
         return FunPaySessionExpired("FunPay session was rejected or expired")
+    if "429" in name or "429" in message or "too many requests" in message:
+        return FunPayRateLimited("FunPay rate limit stopped the read")
+    if "403" in name or "403" in message or "forbidden" in message:
+        return FunPayAccessDenied("FunPay access denial stopped the read")
     if any(marker in name or marker in message for marker in (
-        "timeout", "connect", "network", "requesterror", "429", "403", "too many requests", "forbidden",
+        "timeout", "connect", "network", "requesterror",
     )):
         return FunPayNetworkUnavailable("FunPay is unavailable after controlled retries")
     return FunPayProtocolError("FunPay response could not be normalized")

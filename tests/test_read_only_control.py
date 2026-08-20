@@ -24,6 +24,13 @@ from funpay_operations.read_only_control import (
     _competitor_snapshot,
 )
 from funpay_operations.repositories import TaskStateRepository
+from funpay_operations.read_only_probe import (
+    ProbeMutationTrap,
+    ProbeReadBoundary,
+    ReadOnlyFunPayProbe,
+    ReadOnlyProbeRepository,
+)
+from funpay_operations.lot_discovery import OwnLotRegistryRepository
 from funpay_operations.session_health import FunPaySessionGuard
 from funpay_operations.telegram import TelegramUpdate
 from funpay_operations.telegram_control import EmergencyStopGate, TelegramControlRouter
@@ -91,6 +98,35 @@ class ProductionReadOnlyControlTests(unittest.TestCase):
         self.assertEqual(first.statuses[1].value, "🟢 Подключён")
         self.assertEqual(first.statuses[2].value, "🟢 Подключён")
         self.assertEqual(second.last_funpay_read, "только что")
+
+    def test_production_dashboard_uses_sanitized_probe_counts_without_another_network_read(self) -> None:
+        client = MockFunPayClient(
+            profile=FunPayProfile("private-owner", "private-name", True),
+            own_lot_details=(
+                _lot("private-one", "Mythic+ +10 EU self-play x1"),
+                _lot("private-two", "Unmanaged service"),
+            ),
+            dialogs=(FunPayDialog("private-dialog", "buyer-id", "Buyer Name", None),),
+        )
+        repository = ReadOnlyProbeRepository(self.database, cooldown_seconds=0)
+        repository.request()
+        trap = ProbeMutationTrap()
+        ReadOnlyFunPayProbe(
+            ProbeReadBoundary(client, trap), OwnLotRegistryRepository(self.database), repository,
+            trap=trap, build_sha="b" * 40,
+        ).run_pending()
+        calls_after_probe = tuple(client.calls)
+        service = ProductionReadOnlyControlService(
+            self.database, client, self.settings, self.states, self.guard,
+            telegram_configured=True, logger=logging.getLogger("read-only-control-probe"),
+            probe_repository=repository,
+        )
+
+        dashboard = service.dashboard(emergency_active=False)
+
+        self.assertEqual((dashboard.mythic_lots, dashboard.unknown_lots, dashboard.ambiguous_lots), (1, 1, 0))
+        self.assertEqual(client.calls, list(calls_after_probe))
+        self.assertNotIn("private", repr(dashboard))
 
     def test_auth_expired_and_network_unavailable_are_distinct_and_cached(self) -> None:
         notifications: list[str] = []

@@ -376,6 +376,36 @@ MIGRATIONS: tuple[Migration, ...] = (
             ON read_only_price_observations(service_code, observed_at)""",
         ),
     ),
+    (
+        13,
+        "sanitized read-only FunPay probe state",
+        (
+            """CREATE TABLE IF NOT EXISTS read_only_probe_state (
+                singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                requested_at TEXT,
+                started_at TEXT,
+                finished_at TEXT,
+                state TEXT NOT NULL CHECK (state IN ('idle', 'requested', 'running', 'succeeded', 'failed')),
+                authorization_ok INTEGER CHECK (authorization_ok IN (0, 1) OR authorization_ok IS NULL),
+                profile_ok INTEGER CHECK (profile_ok IN (0, 1) OR profile_ok IS NULL),
+                own_lots_ok INTEGER CHECK (own_lots_ok IN (0, 1) OR own_lots_ok IS NULL),
+                own_lots_total INTEGER CHECK (own_lots_total >= 0 OR own_lots_total IS NULL),
+                mythic_plus_count INTEGER CHECK (mythic_plus_count >= 0 OR mythic_plus_count IS NULL),
+                unmanaged_count INTEGER CHECK (unmanaged_count >= 0 OR unmanaged_count IS NULL),
+                ambiguous_count INTEGER CHECK (ambiguous_count >= 0 OR ambiguous_count IS NULL),
+                dialogs_ok INTEGER CHECK (dialogs_ok IN (0, 1) OR dialogs_ok IS NULL),
+                dialogs_count INTEGER CHECK (dialogs_count >= 0 OR dialogs_count IS NULL),
+                error_code TEXT,
+                build_sha TEXT NOT NULL DEFAULT 'unknown',
+                schema_version INTEGER NOT NULL DEFAULT 13,
+                mutation_attempts INTEGER NOT NULL DEFAULT 0 CHECK (mutation_attempts >= 0),
+                secrets_exposed INTEGER NOT NULL DEFAULT 0 CHECK (secrets_exposed = 0),
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """INSERT OR IGNORE INTO read_only_probe_state
+            (singleton_id, state, build_sha, schema_version) VALUES (1, 'idle', 'unknown', 13)""",
+        ),
+    ),
 )
 
 

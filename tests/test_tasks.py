@@ -41,3 +41,20 @@ class BackgroundRunnerTests(unittest.TestCase):
             )
             asyncio.run(runner.run(once=True))
             self.assertEqual(calls, ["validate", "refresh"])
+
+    def test_requested_read_only_probe_runs_inside_background_supervisor(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            database = Database(root / "operations.sqlite3")
+            database.initialize()
+            settings = Settings(
+                "test", "INFO", root, database.path, root / "logs", root / "backups",
+                "safe", False, 1, 1, 2, "funpay", "telegram", (), "RUB", None,
+            )
+            calls: list[str] = []
+            runner = BackgroundRunner(
+                settings, database, logging.getLogger("funpay_operations.probe-background"),
+                read_only_probe=lambda: calls.append("probe"),
+            )
+            asyncio.run(runner.run(once=True))
+            self.assertEqual(calls, ["probe"])

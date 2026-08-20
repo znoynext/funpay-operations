@@ -22,6 +22,21 @@ production только в read-only режиме. Реальная FunPay-се�
 включение/отключение лотов, изменение цен и raise. Ручное включение этих
 операций через конфигурацию невозможно в текущем релизе.
 
+### Локальная read-only проверка FunPay
+
+Кнопка `🔍 Проверить FunPay` доступна в Setup Center и Telegram владельца.
+Она записывает в SQLite только локальную команду; установленный background
+process под тем же Windows user сам читает DPAPI и выполняет один ограниченный
+цикл: profile/authorization, own lots и dialogs metadata. UI не получает
+decrypted session и показывает только агрегаты без ID, имён покупателей и
+текстов сообщений. Повторный параллельный запуск и частый спам блокируются.
+
+Результат хранится в `read_only_probe_state`; реальные lot IDs остаются только
+в предназначенном для них локальном Own Lot Registry. Проверка не запускает
+market scan и не открывает ни одной write capability. После неё price writes,
+lot writes, raise, auto-reply, Telegram replies и automation остаются
+`DISABLED`.
+
 ## Граница управления Mythic+
 
 Единственное управляемое семейство — `mythic_plus`. Собственный лот может

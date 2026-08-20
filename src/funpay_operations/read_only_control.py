@@ -32,6 +32,12 @@ from .lot_discovery import LotDiscovery, OwnLotRegistryRepository, RegisteredLot
 from .price_safety import PriceObservationRecord, SafetyDecisionStatus, SafetyValidatedPricingEngine
 from .pricing import OwnLotPriceState, OwnLotPricingMode, PricePolicy, TrustedPriceObservation
 from .repositories import TaskStateRepository
+from .read_only_probe import (
+    ProbeErrorCode,
+    ProbeState,
+    ReadOnlyProbeRepository,
+    render_safe_probe_result,
+)
 from .service_catalog import ServiceCatalogRepository
 from .session_health import FunPaySessionGuard
 from .telegram_views import (
@@ -194,6 +200,7 @@ class ProductionReadOnlyControlService:
     LOCAL_ACTIONS = frozenset({
         "pause", "resume", "lot_automatic", "lot_paused", "lot_check_only", "lot_set_fixed",
         "lot_set_floor", "lot_clear_floor", "seller_add", "seller_remove", "seller_disable", "seller_remap",
+        "run_probe",
     })
     FUNPAY_MUTATIONS = frozenset({
         "mass_lot_sync", "mass_price_update", "update_raise", "rollback", "disable_lots",
@@ -206,12 +213,14 @@ class ProductionReadOnlyControlService:
         session_guard: FunPaySessionGuard, *, telegram_configured: bool, logger: logging.Logger,
         health_ttl_seconds: float = 45.0, clock: Callable[[], float] = time.monotonic,
         session_expired_callback: Callable[[], None] | None = None,
+        probe_repository: ReadOnlyProbeRepository | None = None,
     ) -> None:
         if health_ttl_seconds <= 0:
             raise ValueError("health TTL must be positive")
         self.database, self.funpay, self.settings, self.states = database, funpay, settings, states
         self.session_guard, self.telegram_configured, self.logger = session_guard, telegram_configured, logger
         self.session_expired_callback = session_expired_callback
+        self.probe_repository = probe_repository
         self.registry = OwnLotRegistryRepository(database)
         self.controls = LotControlRepository(database)
         self.seller_repository = TrustedSellerRepository(database)
@@ -242,6 +251,10 @@ class ProductionReadOnlyControlService:
         if action == "seller_recheck":
             self._recheck_sellers()
             return "checked"
+        if action == "run_probe":
+            if self.probe_repository is None:
+                raise RuntimeError("read-only probe is unavailable")
+            return self.probe_repository.request().value
         if action in {"pause", "resume"}:
             return "local-state"
         if action.startswith("lot_"):
@@ -253,28 +266,68 @@ class ProductionReadOnlyControlService:
         raise RealOperationsDisabled("Реальные изменения FunPay пока не разрешены.")
 
     def dashboard(self, *, emergency_active: bool) -> DashboardView:
+        if self.probe_repository is not None:
+            probe = self.probe_repository.load()
+            probe_status = {
+                ProbeState.IDLE: FunPayReadStatus.NOT_CHECKED,
+                ProbeState.REQUESTED: FunPayReadStatus.CHECKING,
+                ProbeState.RUNNING: FunPayReadStatus.CHECKING,
+                ProbeState.SUCCEEDED: FunPayReadStatus.CONNECTED,
+                ProbeState.FAILED: (
+                    FunPayReadStatus.AUTHORIZATION_REQUIRED
+                    if probe.error_code is ProbeErrorCode.AUTHORIZATION_REQUIRED
+                    else FunPayReadStatus.UNAVAILABLE
+                ),
+            }[probe.state]
+            managed = probe.mythic_plus_count or 0
+            unmanaged = probe.unmanaged_count or 0
+            ambiguous = probe.ambiguous_count or 0
+            return self._dashboard_view(
+                emergency_active, probe_status, managed, unmanaged, ambiguous,
+                "только что" if probe.state is ProbeState.SUCCEEDED else probe.finished_at or "Пока не проверено",
+            )
         health = self.health()
         if health.status is FunPayReadStatus.CONNECTED and not self.registry.list() and not self._discovery_attempted:
             self.refresh_lots()
             health = self.health()
         lots = self.registry.list()
+        return self._dashboard_view(
+            emergency_active, health.status,
+            sum(_is_managed_mythic_plus(item, self._confirmed_service_code(item.details.lot_id)) for item in lots),
+            sum(not _is_managed_mythic_plus(item, self._confirmed_service_code(item.details.lot_id)) for item in lots),
+            sum(item.classification.ambiguous for item in lots),
+            health.successful_read_at or "Пока не проверено",
+        )
+
+    def _dashboard_view(
+        self,
+        emergency_active: bool,
+        health_status: FunPayReadStatus,
+        managed: int,
+        unmanaged: int,
+        ambiguous: int,
+        last_read: str,
+    ) -> DashboardView:
         return DashboardView(
             (
                 StatusView("Bot", "🟢 Работает"),
-                StatusView("FunPay", _health_label(health.status)),
+                StatusView("FunPay", _health_label(health_status)),
                 StatusView("Telegram", "🟢 Подключён" if self.telegram_configured else "⚪ Не настроен"),
                 StatusView("Automation", "⏸ Выключена"),
                 StatusView("Emergency stop", "🔴 Активен" if emergency_active else "🟢 Не активен"),
             ),
-            sum(_is_managed_mythic_plus(item, self._confirmed_service_code(item.details.lot_id)) for item in lots),
-            sum(not _is_managed_mythic_plus(item, self._confirmed_service_code(item.details.lot_id)) for item in lots),
+            managed,
+            unmanaged + ambiguous,
             "Не выполнялось: запись отключена", "Не выполнялся: raise отключён", "Не планируется",
-            last_funpay_read=health.successful_read_at or "Пока не проверено",
-            unknown_lots=sum(not _is_managed_mythic_plus(
-                item, self._confirmed_service_code(item.details.lot_id)
-            ) for item in lots),
-            ambiguous_lots=sum(item.classification.ambiguous for item in lots),
+            last_funpay_read=last_read,
+            unknown_lots=unmanaged,
+            ambiguous_lots=ambiguous,
         )
+
+    def probe_status(self) -> str:
+        if self.probe_repository is None:
+            return "🔍 Безопасная проверка FunPay\n\nПроверка недоступна."
+        return render_safe_probe_result(self.probe_repository.load())
 
     def family(self, family: str) -> FamilyView:
         if family != "Mythic+":

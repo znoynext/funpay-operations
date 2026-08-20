@@ -9,8 +9,10 @@ from types import SimpleNamespace
 from funpay_operations.config import Settings
 from funpay_operations.funpay import (
     DisabledFunPayReplyClient,
+    FunPayAccessDenied,
     FunPayBumpMetadata,
     FunPayNetworkUnavailable,
+    FunPayRateLimited,
     FunPayProfile,
     FunPaySessionExpired,
     MockFunPayClient,
@@ -264,6 +266,36 @@ class FunPayClientTests(unittest.TestCase):
         with self.assertRaisesRegex(FunPayNetworkUnavailable, "circuit breaker"):
             client.get_profile()
         self.assertEqual(created, 2)
+
+    def test_429_and_403_stop_without_retry(self) -> None:
+        for message, expected in (
+            ("HTTP 429 too many requests", FunPayRateLimited),
+            ("HTTP 403 forbidden", FunPayAccessDenied),
+        ):
+            with self.subTest(message=message):
+                created = 0
+
+                class DeniedTools(FakeTools):
+                    def __init__(self) -> None:
+                        super().__init__()
+                        self.account.profile.get_user_data = self.fail  # type: ignore[method-assign]
+
+                    async def fail(self) -> object:
+                        raise FpxRequestError(message)
+
+                def factory(*_: str) -> DeniedTools:
+                    nonlocal created
+                    created += 1
+                    return DeniedTools()
+
+                client = NativeFunPayClient(
+                    lambda: json.dumps({"golden_key": "key", "golden_seal": "seal"}),
+                    currency="RUB", allow_replies=False, tools_factory=factory,
+                    max_attempts=3, retry_initial_seconds=1, retry_max_seconds=2,
+                )
+                with self.assertRaises(expected):
+                    client.get_profile()
+                self.assertEqual(created, 1)
 
     def test_production_read_client_never_inherits_reply_capability_from_live_config(self) -> None:
         settings = Settings(

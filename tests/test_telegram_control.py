@@ -186,6 +186,26 @@ class TelegramControlRouterTests(unittest.TestCase):
         self.assertIsNone(self.router.handle(self.update(callback=callback, user=2, chat=2)))
         self.assertEqual(self.services.calls, [])
 
+    def test_owner_can_queue_probe_from_home_and_unauthorized_user_cannot(self) -> None:
+        home = self.router.handle(self.update("Статус"))
+        started = self.press(home, "🔍 Проверить FunPay")
+        self.assertIn("Проверяю FunPay", started.text)
+        self.assertEqual(self.services.calls, [("run_probe", None)])
+
+        other = TelegramControlRouter((1,), self.states, MockControlService(), self.gate)
+        self.assertIsNone(other.handle(self.update("🔍 Проверить FunPay", user=2, chat=2)))
+        self.assertEqual(other.services.calls, [])
+
+    def test_probe_button_is_also_present_in_settings(self) -> None:
+        settings = self.router.handle(self.update("⚙️ Настройки"))
+        probe = self.press(settings, "🔍 Проверить FunPay")
+        self.assertIn("Ничего на FunPay не изменяется", probe.text)
+
+    def test_sanitized_probe_completion_callback_is_owner_only(self) -> None:
+        status = self.router.handle(self.update(callback="probe:status"))
+        self.assertIn("Безопасная проверка FunPay", status.text)
+        self.assertIsNone(self.router.handle(self.update(callback="probe:status", user=2, chat=2)))
+
     def test_funpay_reauthorization_help_callback_is_private_and_has_no_session_data(self) -> None:
         reply = self.router.handle(self.update(callback="setup:funpay"))
         self.assertIn("Как восстановить FunPay", reply.text)

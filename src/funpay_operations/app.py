@@ -11,6 +11,16 @@ from .logging_setup import configure_logging
 from .notifications import FunPayMessageNotifier
 from .replies import FunPayReplyRouter
 from .read_only_control import ProductionReadOnlyControlService
+from .read_only_probe import (
+    ProbeErrorCode,
+    ProbeMutationTrap,
+    ProbeReadBoundary,
+    ProbeState,
+    ReadOnlyFunPayProbe,
+    ReadOnlyProbeRepository,
+    render_safe_probe_result,
+)
+from .lot_discovery import OwnLotRegistryRepository
 from .repositories import DialogRepository, ReplyRepository, TaskStateRepository, TelegramMessageLinkRepository
 from .session_health import FunPaySessionGuard, SESSION_EXPIRED_MARKUP, SESSION_EXPIRED_TEXT
 from .setup_wizard import SecretStore, SecretStoreError
@@ -42,6 +52,12 @@ class Application:
         self.funpay = build_read_client(
             settings, secret_store
         )
+        self.probe_repository = ReadOnlyProbeRepository(self.database)
+        self.probe_trap = ProbeMutationTrap()
+        self.read_only_probe = ReadOnlyFunPayProbe(
+            ProbeReadBoundary(self.funpay, self.probe_trap),
+            OwnLotRegistryRepository(self.database), self.probe_repository, trap=self.probe_trap,
+        )
         # This production release has no reachable FunPay mutation adapter.
         self.funpay_replies = DisabledFunPayReplyClient()
         self.telegram = build_telegram_bot(
@@ -55,6 +71,7 @@ class Application:
             self.database, self.funpay, settings, self.task_states, self.session_guard,
             telegram_configured=self.telegram_enabled and confirmed_owner is not None, logger=self.logger,
             session_expired_callback=self._notify_funpay_session_expired,
+            probe_repository=self.probe_repository,
         )
         self.telegram.set_interaction_router(
             CompositeTelegramRouter(
@@ -84,6 +101,7 @@ class Application:
             telegram_enabled=self.telegram_enabled,
             session_validation=lambda: self.control_service.health(force=True),
             read_model_refresh=self.control_service.refresh_lots,
+            read_only_probe=self._run_read_only_probe,
         )
         self.process_lock = SingletonProcessLock(settings.data_directory / "funpay-operations.lock")
 
@@ -101,6 +119,31 @@ class Application:
         except (TelegramError, PermissionError):
             self.logger.warning("FunPay session expiry notification could not be delivered")
 
+    def _run_read_only_probe(self) -> object:
+        result = self.read_only_probe.run_pending()
+        if result is None:
+            return None
+        if result.state is ProbeState.SUCCEEDED:
+            self.session_guard.mark_authorized()
+        elif result.error_code is ProbeErrorCode.AUTHORIZATION_REQUIRED:
+            self.session_guard.mark_expired()
+        if self.telegram_enabled and self.telegram_notification_user_id is not None:
+            try:
+                markup = (
+                    SESSION_EXPIRED_MARKUP
+                    if result.error_code is ProbeErrorCode.AUTHORIZATION_REQUIRED
+                    else {"inline_keyboard": [[{"text": "Статус проверки", "callback_data": "probe:status"}]]}
+                )
+                self.telegram.send_private_notification(
+                    self.telegram_notification_user_id,
+                    render_safe_probe_result(result),
+                    markup,
+                )
+            except (TelegramError, PermissionError):
+                self.logger.warning("Sanitized FunPay probe notification could not be delivered")
+        self.logger.info("Read-only FunPay probe completed; state=%s error_code=%s", result.state, result.error_code)
+        return result
+
     @classmethod
     def from_files(cls, config_path: Path, env_path: Path) -> "Application":
         return cls(load_settings(config_path=config_path, env_path=env_path))
@@ -111,6 +154,7 @@ class Application:
         self.logger.info("Application started in %s environment", self.settings.environment)
         try:
             with self.process_lock:
+                self.probe_repository.recover_interrupted()
                 await self.runner.run(once=once)
         finally:
             await self.runner.shutdown()
