@@ -146,6 +146,44 @@ class TelegramControlRouterTests(unittest.TestCase):
         self.assertNotIn("SellerName 🟢", deleted.text)
         self.assertIn(("seller_add", "SellerName"), self.services.calls)
 
+    def test_batch_own_mapping_seller_and_floor_onboarding_is_confirmation_first(self) -> None:
+        family = self.router.handle(self.update("⚔️ Mythic+"))
+        mapping = self.press(family, "⚙️ Настроить Mythic+ лоты")
+        self.assertIn("Уверенно распознано: 2", mapping.text)
+        overview_buttons = [
+            button["text"] for row in mapping.reply_markup["inline_keyboard"] for button in row
+        ]
+        self.assertNotIn("✅ Подтвердить точные", overview_buttons)
+        preview = self.press(mapping, "👀 Проверить все")
+        self.assertNotIn(("confirm_own_high", None), self.services.calls)
+        confirmed = self.press(preview, "✅ Подтвердить точные")
+        self.assertIn(("confirm_own_high", None), self.services.calls)
+        self.assertIn("Настройка Mythic+ лотов", confirmed.text)
+
+        sellers = self.router.handle(self.update("👥 Продавцы"))
+        prompt = self.press(sellers, "📋 Добавить списком")
+        self.assertIn("по одному в строке", prompt.text)
+        seller_preview = self.router.handle(self.update("SellerThree\nSellerFour"))
+        self.assertIn("✅ SellerThree", seller_preview.text)
+        self.press(seller_preview, "✅ Добавить точные")
+        self.assertIn(("seller_add_batch", None), self.services.calls)
+
+        floors = self.router.handle(self.update("Минимальные цены"))
+        floor_prompt = self.press(floors, "📋 Задать по ключам")
+        self.assertIn("+2 500", floor_prompt.text)
+        floor_preview = self.router.handle(self.update("+10 1000\n+12 1500"))
+        self.assertIn("+10 → 1000 ₽", floor_preview.text)
+        self.assertNotIn(("floor_set_key_batch", None), self.services.calls)
+        self.press(floor_preview, "✅ Сохранить")
+        self.assertIn(("floor_set_key_batch", None), self.services.calls)
+
+    def test_readiness_and_prepare_live_test_never_expose_write_confirmation(self) -> None:
+        screen = self.router.handle(self.update("Готовность"))
+        self.assertIn("LIVE:\n🔒 Выключен", screen.text)
+        explanation = self.press(screen, "🧪 Подготовить первый live-тест")
+        self.assertIn("отдельного явного разрешения", explanation.text)
+        self.assertNotIn(("mass_price_update", None), self.services.calls)
+
     def test_messages_screen_explains_reply_flow_without_dialog_ids(self) -> None:
         reply = self.router.handle(self.update("💬 Сообщения"))
         self.assertIn("Нажмите «Ответить»", reply.text)

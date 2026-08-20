@@ -9,28 +9,40 @@ dependency.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Protocol
+from typing import Mapping, Protocol
 
 from .telegram import CommandReply, TelegramInteractionRouter, TelegramUpdate, TaskStateStore
 from .telegram_views import (
     DashboardView,
+    CompetitorMappingOverviewView,
     FamilyView,
     LotView,
     MappingChoiceView,
+    MinimumPriceOverviewView,
+    OwnMappingCandidateView,
+    OwnMappingOverviewView,
     PriceOverviewView,
     PricePreviewView,
     ReferencePriceView,
     SellerCandidateView,
+    SellerBatchPreviewView,
     TrustedSellerView,
+    ReadinessView,
+    competitor_mapping_overview_text,
     dashboard_text,
     family_text,
     lot_text,
     mappings_text,
+    minimum_price_overview_text,
+    own_mapping_overview_text,
+    own_mapping_preview_text,
     price_overview_text,
     price_preview_text,
     sellers_text,
     seller_candidate_text,
+    seller_batch_preview_text,
     settings_text,
+    readiness_text,
 )
 
 
@@ -59,7 +71,14 @@ class ControlService(Protocol):
     def price_preview(self) -> PricePreviewView: ...
     def sellers(self) -> tuple[TrustedSellerView, ...]: ...
     def find_seller(self, nickname: str) -> SellerCandidateView | None: ...
+    def find_sellers(self, value: str) -> SellerBatchPreviewView: ...
     def mapping_choices(self) -> tuple[MappingChoiceView, ...]: ...
+    def own_mapping_overview(self) -> OwnMappingOverviewView: ...
+    def preview_own_mapping_correction(self, key: str, value: str) -> OwnMappingCandidateView: ...
+    def competitor_mapping_overview(self) -> CompetitorMappingOverviewView: ...
+    def minimum_price_overview(self) -> MinimumPriceOverviewView: ...
+    def preview_minimum_price_batch(self, value: str) -> Mapping[int, int]: ...
+    def readiness(self) -> ReadinessView: ...
     def probe_status(self) -> str: ...
 
 
@@ -180,11 +199,46 @@ class MockControlService:
         clean = nickname.strip()[:64]
         return SellerCandidateView(clean, True) if clean else None
 
+    def find_sellers(self, value: str) -> SellerBatchPreviewView:
+        names = tuple(line.strip() for line in value.splitlines() if line.strip())
+        return SellerBatchPreviewView(names, ())
+
     def mapping_choices(self) -> tuple[MappingChoiceView, ...]:
         return (
-            MappingChoiceView("Mythic+ +10", "EU • Self-play • x1"),
-            MappingChoiceView("Mythic+ +10 package", "EU • Self-play • x3"),
+            MappingChoiceView("Mythic+ +10", "EU • Self-play • x1", "Mythic+ +10"),
+            MappingChoiceView("Mythic+ +10 package", "EU • Self-play • x3", "Mythic+ +10 package"),
         )
+
+    def own_mapping_overview(self) -> OwnMappingOverviewView:
+        candidates = tuple(OwnMappingCandidateView(
+            item.key, item.title, " • ".join(item.attributes), "high", "candidate",
+            ("critical fields: mock structured data",), (), True,
+        ) for item in self._lots.values())
+        return OwnMappingOverviewView(len(candidates), len(candidates), 0, 0, 0, candidates)
+
+    def preview_own_mapping_correction(self, key: str, value: str) -> OwnMappingCandidateView:
+        del value
+        lot = self._lots[key]
+        return OwnMappingCandidateView(
+            key, lot.title, "+10 • EU • Self-play • x1", "high", "candidate",
+            ("critical fields: explicitly entered by owner",), (), False,
+        )
+
+    def competitor_mapping_overview(self) -> CompetitorMappingOverviewView:
+        return CompetitorMappingOverviewView(2, 2, 0, 0, self.mapping_choices())
+
+    def minimum_price_overview(self) -> MinimumPriceOverviewView:
+        return MinimumPriceOverviewView(False, 0, 0, 0, len(self._lots))
+
+    def preview_minimum_price_batch(self, value: str) -> Mapping[int, int]:
+        result: dict[int, int] = {}
+        for line in value.splitlines():
+            level, amount = line.replace("+", "").split()
+            result[int(level)] = int(amount) * 100
+        return result
+
+    def readiness(self) -> ReadinessView:
+        return ReadinessView(len(self._lots), 0, len(self._sellers), 2, 0, 0, 0, len(self._lots), False)
 
     def probe_status(self) -> str:
         return self._probe_status
@@ -242,6 +296,7 @@ class TelegramControlRouter:
         "⚙️ настройки": _Intent("settings"), "статус": _Intent("home"),
         "/start": _Intent("home"), "/status": _Intent("home"),
         "обновить цены": _Intent("price_preview"), "проверить цены": _Intent("check_prices"),
+        "минимальные цены": _Intent("minimum_prices"), "готовность": _Intent("readiness"),
         "rollback": _Intent("rollback_preview"), "emergency stop": _Intent("emergency_preview"),
         "pause": _Intent("pause"), "resume": _Intent("resume_preview"),
     }
@@ -308,6 +363,13 @@ class TelegramControlRouter:
 
     def _input(self, user_id: int, text: str) -> CommandReply:
         mode, payload = self._input_modes.pop(user_id)
+        if mode == "seller_batch":
+            preview = self.services.find_sellers(text)
+            rows = []
+            if preview.exact:
+                rows.append([("✅ Добавить точные", _Intent("confirm", "seller_add_batch"))])
+            rows.append([("Исправить список", _Intent("seller_add_batch_input")), ("Отмена", _Intent("sellers"))])
+            return self._render(user_id, seller_batch_preview_text(preview), rows)
         if mode == "seller_add":
             if len(text) > 64 or "\r" in text or "\n" in text:
                 return self._render(user_id, "Ник должен быть одной строкой до 64 символов.", [
@@ -321,6 +383,44 @@ class TelegramControlRouter:
             return self._render(user_id, seller_candidate_text(candidate), [
                 [("Добавить для Mythic+", _Intent("confirm", f"seller_add:{candidate.nickname}"))],
                 [("❌ Отмена", _Intent("sellers"))],
+            ])
+        if mode == "own_mapping_correction" and payload:
+            preview = self.services.preview_own_mapping_correction(payload, text)
+            body = (
+                "⚠️ Исправление Mythic+ варианта\n\n"
+                f"Предпросмотр: {preview.variant_label}\n"
+                "Источник: явное подтверждение владельца.\n\n"
+                "Это изменит только локальное сопоставление; FunPay не изменяется."
+            )
+            return self._render(user_id, body, [
+                [("✅ Подтвердить", _Intent("confirm", f"own_manual:{payload}"))],
+                [("Исправить", _Intent("own_mapping_correct_input", payload)),
+                 ("Отмена", _Intent("own_mappings"))],
+            ])
+        if mode == "floor_global":
+            clean = text.strip().replace(" ", "")
+            if not clean or len(clean) > 16:
+                raise ValueError("minimum price is invalid")
+            amount = self.services.preview_minimum_price_batch(f"+1 {clean}")[1]
+            return self._render(user_id, f"Минимально допустимая цена для всех Mythic+: {amount // 100} ₽", [
+                [("✅ Сохранить", _Intent("confirm", f"floor_global:{clean}"))],
+                [("Исправить", _Intent("floor_global_input")), ("Отмена", _Intent("minimum_prices"))],
+            ])
+        if mode == "floor_batch":
+            values = self.services.preview_minimum_price_batch(text)
+            preview = "\n".join(f"+{key} → {minor // 100} ₽" for key, minor in sorted(values.items()))
+            return self._render(user_id, f"Минимальные цены\n\n{preview}", [
+                [("✅ Сохранить", _Intent("confirm", "floor_key_batch"))],
+                [("Исправить", _Intent("floor_batch_input")), ("Отмена", _Intent("minimum_prices"))],
+            ])
+        if mode == "floor_variant" and payload:
+            clean = text.strip().replace(" ", "")
+            if not clean or len(clean) > 16:
+                raise ValueError("minimum price is invalid")
+            amount = self.services.preview_minimum_price_batch(f"+1 {clean}")[1]
+            return self._render(user_id, f"Минимально допустимая цена варианта: {amount // 100} ₽", [
+                [("✅ Сохранить", _Intent("confirm", f"floor_variant:{payload}:{clean}"))],
+                [("Исправить", _Intent("floor_variant_input", payload)), ("Отмена", _Intent("minimum_prices"))],
             ])
         if mode in {"fixed_price", "hard_floor"} and payload:
             if not 1 <= len(text) <= 8 or not text.isdecimal() or not 1 <= int(text) <= 10_000_000:
@@ -338,6 +438,22 @@ class TelegramControlRouter:
             return self._home(user_id, edit=edit)
         if action == "family" and payload:
             return self._family_screen(user_id, payload, edit=edit)
+        if action == "own_mappings":
+            return self._own_mappings_screen(user_id, edit=edit)
+        if action == "own_mapping_analyze":
+            self._run("own_mapping_analyze")
+            return self._own_mappings_screen(user_id, edit=edit)
+        if action == "own_mapping_preview":
+            return self._own_mapping_preview_screen(user_id, attention_only=False, edit=edit)
+        if action == "own_mapping_attention":
+            return self._own_mapping_preview_screen(user_id, attention_only=True, edit=edit)
+        if action == "own_mapping_correct_input" and payload:
+            self._input_modes[user_id] = ("own_mapping_correction", payload)
+            return self._render(
+                user_id,
+                "Введите только исправленные параметры одной строкой.\n\nПример: +10 EU self-play x1",
+                [[("Назад", _Intent("own_mapping_attention"))]], edit=edit,
+            )
         if action == "lots":
             return self._lots_screen(user_id, None, edit=edit)
         if action == "family_lots" and payload:
@@ -349,7 +465,14 @@ class TelegramControlRouter:
         if action == "price_preview":
             return self._price_preview_screen(user_id, edit=edit)
         if action == "check_prices":
-            return self._run_readonly(user_id, "check_prices", "Проверка цен запущена. Это только чтение.", edit=edit)
+            try:
+                self._run("check_prices")
+            except RuntimeError:
+                return self._render(
+                    user_id, "Не удалось выполнить проверку. Ничего на FunPay не изменялось.",
+                    [[("Повторить", _Intent("check_prices")), ("Назад", _Intent("prices"))]], edit=edit,
+                )
+            return self._dry_run_screen(user_id, edit=edit)
         if action == "rollback_preview":
             return self._confirm_screen(user_id, "rollback", "↩️ Rollback", "Будут восстановлены последние подтверждённые цены.", edit=edit)
         if action == "update_raise_preview":
@@ -359,12 +482,21 @@ class TelegramControlRouter:
         if action == "seller_add_input":
             self._input_modes[user_id] = ("seller_add", None)
             return self._render(user_id, "Введите ник продавца", [[("Назад", _Intent("sellers"))]], edit=edit)
+        if action == "seller_add_batch_input":
+            self._input_modes[user_id] = ("seller_batch", None)
+            return self._render(
+                user_id, "Отправьте nicknames одним сообщением — по одному в строке.",
+                [[("Назад", _Intent("sellers"))]], edit=edit,
+            )
         if action == "seller_remove_select":
             return self._seller_remove_screen(user_id, edit=edit)
         if action == "seller_disable_select":
             return self._seller_disable_screen(user_id, edit=edit)
         if action == "mappings":
-            return self._mappings_screen(user_id, edit=edit)
+            return self._competitor_mappings_screen(user_id, edit=edit)
+        if action == "competitor_discover":
+            self._run("competitor_discover")
+            return self._competitor_mappings_screen(user_id, edit=edit)
         if action == "seller_recheck":
             return self._run_then_sellers(user_id, "seller_recheck", edit=edit)
         if action == "seller_remap" and payload:
@@ -375,6 +507,30 @@ class TelegramControlRouter:
             return self._messages_screen(user_id, edit=edit)
         if action == "settings":
             return self._settings_screen(user_id, edit=edit)
+        if action == "minimum_prices":
+            return self._minimum_prices_screen(user_id, edit=edit)
+        if action == "floor_global_input":
+            self._input_modes[user_id] = ("floor_global", None)
+            return self._render(user_id, "Введите общий минимум в рублях.", [[("Назад", _Intent("minimum_prices"))]], edit=edit)
+        if action == "floor_batch_input":
+            self._input_modes[user_id] = ("floor_batch", None)
+            return self._render(
+                user_id, "Введите минимумы по ключам — по одному в строке.\n\n+2 500\n+3 550\n+4 600",
+                [[("Назад", _Intent("minimum_prices"))]], edit=edit,
+            )
+        if action == "floor_variant_select":
+            return self._floor_variant_select_screen(user_id, edit=edit)
+        if action == "floor_variant_input" and payload:
+            self._input_modes[user_id] = ("floor_variant", payload)
+            return self._render(user_id, "Введите минимум для выбранного варианта в рублях.", [[("Назад", _Intent("minimum_prices"))]], edit=edit)
+        if action == "readiness":
+            return self._readiness_screen(user_id, edit=edit)
+        if action == "prepare_live_test":
+            return self._simple_screen(
+                user_id,
+                "🧪 Первый live-тест\n\nСледующий этап потребует отдельного явного разрешения. Сейчас любые FunPay write-операции заблокированы.",
+                _Intent("readiness"), edit=edit,
+            )
         if action == "probe":
             return self._probe_screen(user_id, start=True, edit=edit)
         if action == "probe_status":
@@ -465,13 +621,83 @@ class TelegramControlRouter:
 
     def _family_screen(self, user_id: int, family: str, *, edit: bool) -> CommandReply:
         rows = [
+            [("⚙️ Настроить Mythic+ лоты", _Intent("own_mappings"))],
             [("📦 Лоты", _Intent("family_lots", family)), ("💰 Проверить цены", _Intent("check_prices"))],
-            [("⚙️ Настройки family", _Intent("settings"))],
+            [("👥 Trusted sellers", _Intent("sellers")), ("💰 Минимальные цены", _Intent("minimum_prices"))],
+            [("🧪 Готовность", _Intent("readiness"))],
             _nav(),
         ]
         if self._writes_available():
             rows.insert(1, [("💸 Обновить цены", _Intent("price_preview")), ("🔄 Обновить и поднять", _Intent("update_raise_preview"))])
         return self._render(user_id, family_text(self.services.family(family)), rows, edit=edit)
+
+    def _own_mappings_screen(self, user_id: int, *, edit: bool) -> CommandReply:
+        view = self.services.own_mapping_overview()
+        rows = [[("👀 Проверить все", _Intent("own_mapping_preview"))]]
+        if view.attention:
+            rows.append([("⚠️ Разобрать проблемные", _Intent("own_mapping_attention"))])
+        rows.extend([
+            [("🔄 Перечитать и проанализировать", _Intent("own_mapping_analyze"))],
+            _nav(_Intent("family", "Mythic+")),
+        ])
+        return self._render(user_id, own_mapping_overview_text(view), rows, edit=edit)
+
+    def _own_mapping_preview_screen(self, user_id: int, *, attention_only: bool, edit: bool) -> CommandReply:
+        view = self.services.own_mapping_overview()
+        rows: list[list[tuple[str, _Intent]]] = []
+        if not attention_only and view.high:
+            rows.append([("✅ Подтвердить точные", _Intent("confirm", "own_high"))])
+        for item in view.candidates:
+            if item.status != "confirmed" and not item.bulk_confirmable:
+                label = item.variant_label or item.title
+                rows.append([(f"⚠️ {label[:48]}", _Intent("own_mapping_correct_input", item.key))])
+        rows.append(_nav(_Intent("own_mappings")))
+        return self._render(
+            user_id, own_mapping_preview_text(view, attention_only=attention_only), rows, edit=edit
+        )
+
+    def _competitor_mappings_screen(self, user_id: int, *, edit: bool) -> CommandReply:
+        view = self.services.competitor_mapping_overview()
+        rows: list[list[tuple[str, _Intent]]] = []
+        if view.exact:
+            rows.append([("✅ Подтвердить точные", _Intent("confirm", "competitor_high"))])
+        rows.extend([[("🔄 Найти exact lots", _Intent("competitor_discover"))]])
+        rows.extend([[(item.label[:56], _Intent("seller_remap", item.key))]
+                     for item in view.choices if item.key])
+        rows.append(_nav(_Intent("sellers")))
+        return self._render(user_id, competitor_mapping_overview_text(view), rows, edit=edit)
+
+    def _minimum_prices_screen(self, user_id: int, *, edit: bool) -> CommandReply:
+        return self._render(user_id, minimum_price_overview_text(self.services.minimum_price_overview()), [
+            [("⚙️ Задать общий минимум", _Intent("floor_global_input"))],
+            [("📋 Задать по ключам", _Intent("floor_batch_input"))],
+            [("✏️ Изменить отдельный", _Intent("floor_variant_select"))],
+            _nav(_Intent("family", "Mythic+")),
+        ], edit=edit)
+
+    def _floor_variant_select_screen(self, user_id: int, *, edit: bool) -> CommandReply:
+        view = self.services.own_mapping_overview()
+        rows = [[(item.variant_label[:56], _Intent("floor_variant_input", item.key))]
+                for item in view.candidates if item.status == "confirmed" and item.variant_label]
+        rows.append(_nav(_Intent("minimum_prices")))
+        return self._render(user_id, "Выберите подтверждённый Mythic+ вариант.", rows, edit=edit)
+
+    def _dry_run_screen(self, user_id: int, *, edit: bool) -> CommandReply:
+        text = (
+            "READ-ONLY: только чтение, цены не изменяются.\n\n"
+            + price_preview_text(self.services.price_preview()) + "\n\n" + readiness_text(self.services.readiness())
+        )
+        return self._render(user_id, text, [
+            [("📋 Готовность", _Intent("readiness"))],
+            _nav(_Intent("prices")),
+        ], edit=edit)
+
+    def _readiness_screen(self, user_id: int, *, edit: bool) -> CommandReply:
+        return self._render(user_id, readiness_text(self.services.readiness()), [
+            [("⚠️ Исправить mappings", _Intent("own_mappings"))],
+            [("🧪 Подготовить первый live-тест", _Intent("prepare_live_test"))],
+            _nav(_Intent("family", "Mythic+")),
+        ], edit=edit)
 
     def _lots_screen(self, user_id: int, family: str | None, *, edit: bool) -> CommandReply:
         lots = self.services.lots(family)
@@ -507,7 +733,10 @@ class TelegramControlRouter:
         ], edit=edit)
 
     def _prices_screen(self, user_id: int, *, edit: bool) -> CommandReply:
-        rows = [[("Проверить сейчас", _Intent("check_prices")), ("Решения по лотам", _Intent("lots"))]]
+        rows = [
+            [("Проверить сейчас", _Intent("check_prices")), ("Решения по лотам", _Intent("lots"))],
+            [("Минимальные цены", _Intent("minimum_prices")), ("Готовность", _Intent("readiness"))],
+        ]
         if self._writes_available():
             rows.extend([
                 [("Обновить цены", _Intent("price_preview")), ("Rollback", _Intent("rollback_preview"))],
@@ -524,7 +753,8 @@ class TelegramControlRouter:
 
     def _sellers_screen(self, user_id: int, *, edit: bool) -> CommandReply:
         return self._render(user_id, sellers_text(self.services.sellers()), [
-            [("Добавить", _Intent("seller_add_input")), ("Удалить", _Intent("seller_remove_select"))],
+            [("Добавить", _Intent("seller_add_input")), ("📋 Добавить списком", _Intent("seller_add_batch_input"))],
+            [("Удалить", _Intent("seller_remove_select"))],
             [("Отключить", _Intent("seller_disable_select")), ("Проверить", _Intent("seller_recheck"))],
             [("Соответствия", _Intent("mappings"))],
             _nav(),
@@ -560,7 +790,7 @@ class TelegramControlRouter:
             [("Автоматизация" if self._writes_available() else "Автоматизация 🔒", _Intent("automation")),
              ("Автоответ" if self._writes_available() else "Автоответ 🔒", _Intent("auto_reply_toggle"))],
             [("Уведомления", _Intent("notifications")), ("Каталог услуг", _Intent("catalog"))],
-            [("Минимальные цены", _Intent("lots")), ("Диагностика", _Intent("diagnostics"))],
+            [("Минимальные цены", _Intent("minimum_prices")), ("Диагностика", _Intent("diagnostics"))],
             [("🔍 Проверить FunPay", _Intent("probe"))],
             [("Информация о боте", _Intent("about"))],
             [("⚠️ Emergency stop", _Intent("emergency_preview"))],
@@ -636,10 +866,36 @@ class TelegramControlRouter:
             nickname = action.partition(":")[2]
             self._run("seller_add", nickname)
             return self._sellers_screen(user_id, edit=edit)
+        if action == "seller_add_batch":
+            self._run("seller_add_batch")
+            return self._competitor_mappings_screen(user_id, edit=edit)
         if action.startswith("seller_remove:"):
             nickname = action.partition(":")[2]
             self._run("seller_remove", nickname)
             return self._sellers_screen(user_id, edit=edit)
+        if action == "own_high":
+            self._run("confirm_own_high")
+            return self._own_mappings_screen(user_id, edit=edit)
+        if action.startswith("own_manual:"):
+            key = action.partition(":")[2]
+            self._run("confirm_own_manual", key)
+            return self._own_mappings_screen(user_id, edit=edit)
+        if action == "competitor_high":
+            self._run("confirm_competitor_high")
+            return self._competitor_mappings_screen(user_id, edit=edit)
+        if action.startswith("floor_global:"):
+            self._run("floor_set_global", action.partition(":")[2])
+            return self._minimum_prices_screen(user_id, edit=edit)
+        if action == "floor_key_batch":
+            self._run("floor_set_key_batch")
+            return self._minimum_prices_screen(user_id, edit=edit)
+        if action.startswith("floor_variant:"):
+            _, _, remainder = action.partition(":")
+            key, separator, amount = remainder.partition(":")
+            if not separator:
+                raise RuntimeError("minimum-price confirmation is stale")
+            self._run("floor_set_variant", f"{key}:{amount}")
+            return self._minimum_prices_screen(user_id, edit=edit)
         operation = _gate_operation(action)
         if action in {"mass_price_update", "update_raise", "rollback", "mass_lot_sync", "disable_lots"} and not self._writes_available():
             return self._render(

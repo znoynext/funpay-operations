@@ -111,6 +111,66 @@ class SellerCandidateView:
 class MappingChoiceView:
     label: str
     details: str
+    key: str | None = None
+
+
+@dataclass(frozen=True)
+class OwnMappingCandidateView:
+    key: str
+    title: str
+    variant_label: str
+    confidence: str
+    status: str
+    evidence: tuple[str, ...]
+    issues: tuple[str, ...]
+    bulk_confirmable: bool
+
+
+@dataclass(frozen=True)
+class OwnMappingOverviewView:
+    total: int
+    high: int
+    attention: int
+    excluded: int
+    confirmed: int
+    candidates: tuple[OwnMappingCandidateView, ...]
+
+
+@dataclass(frozen=True)
+class SellerBatchPreviewView:
+    exact: tuple[str, ...]
+    attention: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CompetitorMappingOverviewView:
+    checked_variants: int
+    exact: int
+    attention: int
+    no_match: int
+    choices: tuple[MappingChoiceView, ...]
+
+
+@dataclass(frozen=True)
+class MinimumPriceOverviewView:
+    global_configured: bool
+    per_key_count: int
+    variant_count: int
+    covered_lots: int
+    confirmed_lots: int
+
+
+@dataclass(frozen=True)
+class ReadinessView:
+    confirmed_lots: int
+    mapping_attention: int
+    trusted_sellers: int
+    confirmed_competitor_mappings: int
+    competitor_attention: int
+    minimum_prices_covered: int
+    dry_run_ready: int
+    dry_run_blocked: int
+    live_enabled: bool = False
 
 
 def rubles(minor: int, currency: str = "RUB") -> str:
@@ -206,6 +266,80 @@ def seller_candidate_text(view: SellerCandidateView) -> str:
 def mappings_text(choices: tuple[MappingChoiceView, ...]) -> str:
     listed = "\n".join(f"• {item.label}\n  {item.details}" for item in choices)
     return f"Соответствия лотов\n\nНужно выбрать точное соответствие:\n{listed}"
+
+
+def own_mapping_overview_text(view: OwnMappingOverviewView) -> str:
+    lines = [
+        "⚔️ Настройка Mythic+ лотов", "", f"Найдено: {view.total}",
+        f"✅ Уверенно распознано: {view.high}", f"⚠️ Требуют проверки: {view.attention}",
+        f"❌ Не Mythic+/не управлять: {view.excluded}", f"🔒 Уже подтверждено: {view.confirmed}", "",
+        "Перед подтверждением проверьте массовый preview.",
+    ]
+    return "\n".join(lines)
+
+
+def own_mapping_preview_text(view: OwnMappingOverviewView, *, attention_only: bool = False) -> str:
+    selected = tuple(
+        item for item in view.candidates
+        if (not attention_only or (not item.bulk_confirmable and item.status != "confirmed"))
+    )
+    lines = ["📦 Mythic+ — предварительное сопоставление", ""]
+    for index, item in enumerate(selected, start=1):
+        icon = "✅" if item.bulk_confirmable else "🔒" if item.status == "confirmed" else "⚠️"
+        detail = item.variant_label if item.variant_label else "Критические параметры не определены"
+        lines.append(f"{index}. {detail} {icon}")
+        if item.issues:
+            lines.append(f"   Причина: {', '.join(item.issues)}")
+    if not selected:
+        lines.append("Нет лотов в этой группе.")
+    lines.extend(("", "Raw FunPay IDs скрыты. Все подтверждения сохраняются только локально."))
+    return "\n".join(lines)
+
+
+def seller_batch_preview_text(view: SellerBatchPreviewView) -> str:
+    lines = ["👥 Найдено продавцов", ""]
+    lines.extend(f"✅ {nickname}" for nickname in view.exact)
+    lines.extend(f"⚠️ {reason}" for reason in view.attention)
+    if not view.exact:
+        lines.append("Нет однозначно найденных профилей.")
+    return "\n".join(lines)
+
+
+def competitor_mapping_overview_text(view: CompetitorMappingOverviewView) -> str:
+    return (
+        "🔗 Соответствия конкурентов\n\n"
+        f"Проверено вариантов: {view.checked_variants}\n"
+        f"✅ Точных соответствий: {view.exact}\n"
+        f"⚠️ Неоднозначных/несовместимых: {view.attention}\n"
+        f"❌ Не найдено: {view.no_match}\n\n"
+        "Нужно выбрать точное соответствие; неоднозначные варианты не угадываются.\n"
+        "До подтверждения ни одно соответствие не используется для pricing."
+    )
+
+
+def minimum_price_overview_text(view: MinimumPriceOverviewView) -> str:
+    return (
+        "💰 Минимальные цены\n\n"
+        f"Общий минимум: {'✅ задан' if view.global_configured else '⚪ не задан'}\n"
+        f"По ключам: {view.per_key_count}\n"
+        f"Отдельные варианты: {view.variant_count}\n"
+        f"Покрыто подтверждённых лотов: {view.covered_lots}/{view.confirmed_lots}\n\n"
+        "Бот никогда не предложит цену ниже указанного значения. Значения хранятся только локально."
+    )
+
+
+def readiness_text(view: ReadinessView) -> str:
+    return (
+        "🧪 Готовность Mythic+\n\n"
+        f"Лоты:\n✅ Confirmed: {view.confirmed_lots}\n⚠️ Mapping issues: {view.mapping_attention}\n\n"
+        f"Trusted sellers:\n✅ {view.trusted_sellers}\n\n"
+        f"Competitor mappings:\n✅ {view.confirmed_competitor_mappings}\n"
+        f"⚠️ {view.competitor_attention} требуют внимания\n\n"
+        f"Minimum prices:\n✅ {view.minimum_prices_covered}/{view.confirmed_lots}\n\n"
+        f"Pricing dry-run:\n✅ Готово: {view.dry_run_ready}\n"
+        f"⚠️ Требует внимания: {view.dry_run_blocked}\n\n"
+        f"LIVE:\n{'🟢 Включен' if view.live_enabled else '🔒 Выключен'}"
+    )
 
 
 def settings_text(auto_reply_enabled: bool) -> str:

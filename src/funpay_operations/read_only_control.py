@@ -15,20 +15,37 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Callable
+from typing import Callable, Mapping, Protocol
 
 from .config import Settings
 from .database import Database
 from .funpay import (
     FunPayClient,
+    FunPayAccessDenied,
     FunPayError,
     FunPayLotDetails,
     FunPayNetworkUnavailable,
     FunPayProtocolError,
+    FunPayRateLimited,
     FunPaySessionExpired,
     RealOperationsDisabled,
 )
-from .lot_discovery import LotDiscovery, OwnLotRegistryRepository, RegisteredLot, classify_wow_lot
+from .lot_discovery import LotDiscovery, OwnLotRegistryRepository, RegisteredLot
+from .mythic_onboarding import (
+    BudgetDecision,
+    MappingConfidence,
+    MythicVariant,
+    OwnLotMappingRepository,
+    OwnMappingStatus,
+    PreLiveEligibilityGuard,
+    ReadOnlyRequestBudgetRepository,
+    MinimumPriceRepository,
+    opaque_lot_key,
+    parse_manual_variant,
+    parse_minimum_price_batch,
+    parse_mythic_lot,
+    parse_nickname_batch,
+)
 from .price_safety import PriceObservationRecord, SafetyDecisionStatus, SafetyValidatedPricingEngine
 from .pricing import OwnLotPriceState, OwnLotPricingMode, PricePolicy, TrustedPriceObservation
 from .repositories import TaskStateRepository
@@ -45,13 +62,19 @@ from .telegram_views import (
     FamilyView,
     LotView,
     MappingChoiceView,
+    CompetitorMappingOverviewView,
+    MinimumPriceOverviewView,
+    OwnMappingCandidateView,
+    OwnMappingOverviewView,
     PriceChangeView,
     PriceOverviewView,
     PricePreviewView,
     PriceSkipView,
     SellerCandidateView,
+    SellerBatchPreviewView,
     StatusView,
     TrustedSellerView,
+    ReadinessView,
 )
 from .trusted_sellers import (
     CompetitorLotMappingRepository,
@@ -65,6 +88,62 @@ from .trusted_sellers import (
     ServiceMatchSpec,
     TrustedSellerRepository,
 )
+
+
+class ReadOnlyOnboardingClient(Protocol):
+    """Narrow production capability used by onboarding and pricing preview."""
+
+    def has_local_session(self) -> bool: ...
+    def get_profile(self): ...
+    def get_own_lot_details(self) -> tuple[FunPayLotDetails, ...]: ...
+    def get_seller_lot_details(self, seller_id: str) -> tuple[FunPayLotDetails, ...]: ...
+    def get_dialogs(self): ...
+
+
+class OnboardingMutationBlocked(RuntimeError):
+    """Raised if onboarding code resolves a known state-changing capability."""
+
+
+class OnboardingMutationTrap:
+    MUTATIONS = frozenset({
+        "send_reply", "update_price", "change_lot_price", "edit_price", "update_title",
+        "update_description", "create_lot", "enable_lot", "disable_lot", "activate",
+        "deactivate", "raise_lots", "bump", "rollback",
+    })
+
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    def block(self, name: str) -> None:
+        self.attempts += 1
+        raise OnboardingMutationBlocked(f"read-only onboarding blocked mutation capability: {name}")
+
+
+class OnboardingReadBoundary:
+    """Expose only authenticated GET/read operations from the production adapter."""
+
+    def __init__(self, client: FunPayClient, trap: OnboardingMutationTrap) -> None:
+        self.__client, self.__trap = client, trap
+
+    def has_local_session(self) -> bool:
+        return bool(getattr(self.__client, "has_local_session", lambda: True)())
+
+    def get_profile(self):
+        return self.__client.get_profile()
+
+    def get_own_lot_details(self) -> tuple[FunPayLotDetails, ...]:
+        return self.__client.get_own_lot_details()
+
+    def get_seller_lot_details(self, seller_id: str) -> tuple[FunPayLotDetails, ...]:
+        return self.__client.get_seller_lot_details(seller_id)
+
+    def get_dialogs(self):
+        return self.__client.get_dialogs()
+
+    def __getattr__(self, name: str):
+        if name in self.__trap.MUTATIONS:
+            self.__trap.block(name)
+        raise AttributeError(name)
 
 
 class FunPayReadStatus(StrEnum):
@@ -196,11 +275,15 @@ class ReadOnlyPriceObservationRepository:
 class ProductionReadOnlyControlService:
     """Truthful production view service with an unconditional mutation barrier."""
 
-    READ_ACTIONS = frozenset({"refresh", "check_prices", "lot_check", "lot_decision", "seller_recheck"})
+    READ_ACTIONS = frozenset({
+        "refresh", "check_prices", "lot_check", "lot_decision", "seller_recheck",
+        "own_mapping_analyze", "competitor_discover",
+    })
     LOCAL_ACTIONS = frozenset({
         "pause", "resume", "lot_automatic", "lot_paused", "lot_check_only", "lot_set_fixed",
         "lot_set_floor", "lot_clear_floor", "seller_add", "seller_remove", "seller_disable", "seller_remap",
-        "run_probe",
+        "seller_add_batch", "confirm_own_high", "confirm_own_manual", "confirm_competitor_high",
+        "floor_set_global", "floor_set_key_batch", "floor_set_variant", "run_probe",
     })
     FUNPAY_MUTATIONS = frozenset({
         "mass_lot_sync", "mass_price_update", "update_raise", "rollback", "disable_lots",
@@ -209,11 +292,12 @@ class ProductionReadOnlyControlService:
     external_mutations_allowed = False
 
     def __init__(
-        self, database: Database, funpay: FunPayClient, settings: Settings, states: TaskStateRepository,
+        self, database: Database, funpay: ReadOnlyOnboardingClient, settings: Settings, states: TaskStateRepository,
         session_guard: FunPaySessionGuard, *, telegram_configured: bool, logger: logging.Logger,
         health_ttl_seconds: float = 45.0, clock: Callable[[], float] = time.monotonic,
         session_expired_callback: Callable[[], None] | None = None,
         probe_repository: ReadOnlyProbeRepository | None = None,
+        mutation_trap: OnboardingMutationTrap | None = None,
     ) -> None:
         if health_ttl_seconds <= 0:
             raise ValueError("health TTL must be positive")
@@ -221,6 +305,7 @@ class ProductionReadOnlyControlService:
         self.session_guard, self.telegram_configured, self.logger = session_guard, telegram_configured, logger
         self.session_expired_callback = session_expired_callback
         self.probe_repository = probe_repository
+        self.mutation_trap = mutation_trap
         self.registry = OwnLotRegistryRepository(database)
         self.controls = LotControlRepository(database)
         self.seller_repository = TrustedSellerRepository(database)
@@ -228,15 +313,27 @@ class ProductionReadOnlyControlService:
         self.catalog = ServiceCatalogRepository(database)
         self.confirmations = ManualSellerConfirmationAPI(self.seller_repository, self.mapping_repository)
         self.observation_history = ReadOnlyPriceObservationRepository(database)
+        self.own_mapping_repository = OwnLotMappingRepository(database)
+        self.minimum_prices = MinimumPriceRepository(database)
+        self.request_budgets = ReadOnlyRequestBudgetRepository(database)
+        self.eligibility = PreLiveEligibilityGuard()
         self.pricing = SafetyValidatedPricingEngine()
         self.health_ttl_seconds, self.clock = health_ttl_seconds, clock
         self._health = FunPayHealth(FunPayReadStatus.NOT_CHECKED, 0)
         self._health_checking = False
         self._discovery_attempted = False
         self._seller_candidates: dict[str, tuple[str, str]] = {}
+        self._seller_batch_candidates: dict[str, tuple[str, str]] = {}
+        self._seller_identity_cache: dict[str, set[str]] | None = None
+        self._verified_seller_ids: set[str] = set()
         self._mapping_candidates: dict[str, tuple[CompetitorLotSnapshot, tuple[ServiceMatchSpec, ...]]] = {}
+        self._mapping_candidate_labels: dict[str, str] = {}
+        self._mapping_counts = (0, 0, 0, 0)
+        self._pending_corrections: dict[str, MythicVariant] = {}
+        self._pending_floor_batch: dict[int, int] = {}
         self._last_preview = PricePreviewView((), ())
         self._last_calculations: dict[str, str] = {}
+        self._last_readiness = ReadinessView(0, 0, 0, 0, 0, 0, 0, 0, False)
 
     def execute(self, action: str, payload: str | None = None) -> str:
         if action in self.FUNPAY_MUTATIONS or action not in self.READ_ACTIONS | self.LOCAL_ACTIONS:
@@ -248,6 +345,13 @@ class ProductionReadOnlyControlService:
         if action in {"check_prices", "lot_check", "lot_decision"}:
             self._run_price_check(payload)
             return "checked"
+        if action == "own_mapping_analyze":
+            self.refresh_lots(force_health=True)
+            self._analyze_cached_own_lots()
+            return "analyzed"
+        if action == "competitor_discover":
+            self._recheck_sellers()
+            return "checked"
         if action == "seller_recheck":
             self._recheck_sellers()
             return "checked"
@@ -257,6 +361,30 @@ class ProductionReadOnlyControlService:
             return self.probe_repository.request().value
         if action in {"pause", "resume"}:
             return "local-state"
+        if action == "confirm_own_high":
+            result = str(self.own_mapping_repository.confirm_high_batch())
+            self.request_budgets.clear_cooldown("price_observation")
+            return result
+        if action == "confirm_own_manual" and payload:
+            variant = self._pending_corrections.pop(payload, None)
+            if variant is None:
+                raise ValueError("mapping correction preview is stale")
+            self.own_mapping_repository.confirm_manual(payload, variant)
+            self.request_budgets.clear_cooldown("price_observation")
+            return "saved-locally"
+        if action == "confirm_competitor_high":
+            confirmed = 0
+            for key, (snapshot, specs) in tuple(self._mapping_candidates.items()):
+                self.confirmations.confirm_match(snapshot, specs)
+                self._mapping_candidates.pop(key, None)
+                confirmed += 1
+            checked, _, attention, no_match = self._mapping_counts
+            self._mapping_counts = checked, 0, attention, no_match
+            self.request_budgets.clear_cooldown("price_observation")
+            return str(confirmed)
+        if action.startswith("floor_"):
+            self._update_minimum_price(action, payload)
+            return "saved-locally"
         if action.startswith("lot_"):
             self._update_lot_setting(action, payload)
             return "saved-locally"
@@ -267,6 +395,7 @@ class ProductionReadOnlyControlService:
 
     def dashboard(self, *, emergency_active: bool) -> DashboardView:
         if self.probe_repository is not None:
+            mapping_summary = self._analyze_cached_own_lots()
             probe = self.probe_repository.load()
             probe_status = {
                 ProbeState.IDLE: FunPayReadStatus.NOT_CHECKED,
@@ -279,9 +408,9 @@ class ProductionReadOnlyControlService:
                     else FunPayReadStatus.UNAVAILABLE
                 ),
             }[probe.state]
-            managed = probe.mythic_plus_count or 0
-            unmanaged = probe.unmanaged_count or 0
-            ambiguous = probe.ambiguous_count or 0
+            managed = mapping_summary.confirmed
+            unmanaged = mapping_summary.total - mapping_summary.confirmed
+            ambiguous = mapping_summary.attention
             return self._dashboard_view(
                 emergency_active, probe_status, managed, unmanaged, ambiguous,
                 "только что" if probe.state is ProbeState.SUCCEEDED else probe.finished_at or "Пока не проверено",
@@ -290,12 +419,12 @@ class ProductionReadOnlyControlService:
         if health.status is FunPayReadStatus.CONNECTED and not self.registry.list() and not self._discovery_attempted:
             self.refresh_lots()
             health = self.health()
-        lots = self.registry.list()
+        mapping_summary = self._analyze_cached_own_lots()
         return self._dashboard_view(
             emergency_active, health.status,
-            sum(_is_managed_mythic_plus(item, self._confirmed_service_code(item.details.lot_id)) for item in lots),
-            sum(not _is_managed_mythic_plus(item, self._confirmed_service_code(item.details.lot_id)) for item in lots),
-            sum(item.classification.ambiguous for item in lots),
+            mapping_summary.confirmed,
+            mapping_summary.total - mapping_summary.confirmed,
+            mapping_summary.attention,
             health.successful_read_at or "Пока не проверено",
         )
 
@@ -329,6 +458,100 @@ class ProductionReadOnlyControlService:
             return "🔍 Безопасная проверка FunPay\n\nПроверка недоступна."
         return render_safe_probe_result(self.probe_repository.load())
 
+    def own_mapping_overview(self) -> OwnMappingOverviewView:
+        summary = self._analyze_cached_own_lots()
+        candidates = tuple(OwnMappingCandidateView(
+            item.opaque_key, item.display_title,
+            item.variant.label if item.variant else "",
+            item.confidence.value, item.status.value, item.evidence,
+            item.missing_fields + item.ambiguity_reasons,
+            item.bulk_confirmable,
+        ) for item in summary.reviews)
+        return OwnMappingOverviewView(
+            summary.total, summary.high, summary.attention, summary.excluded, summary.confirmed, candidates
+        )
+
+    def preview_own_mapping_correction(self, key: str, value: str) -> OwnMappingCandidateView:
+        current = self.own_mapping_repository.get_by_opaque_key(key)
+        variant = parse_manual_variant(value)
+        self._pending_corrections[key] = variant
+        return OwnMappingCandidateView(
+            key, current.display_title, variant.label, MappingConfidence.HIGH.value,
+            OwnMappingStatus.CANDIDATE.value, ("critical fields: explicitly entered by owner",), (), False,
+        )
+
+    def find_sellers(self, value: str) -> SellerBatchPreviewView:
+        nicknames = parse_nickname_batch(value)
+        decision = self.request_budgets.claim("seller_lookup", cooldown_seconds=5)
+        using_cache = decision is not BudgetDecision.ALLOWED
+        if using_cache and self._seller_identity_cache is None:
+            raise RuntimeError("seller lookup is rate limited")
+        exact: list[str] = []
+        attention: list[str] = []
+        self._seller_batch_candidates = {}
+        try:
+            self._require_connected()
+            if not using_cache:
+                dialogs = self.funpay.get_dialogs()
+                identities: dict[str, set[str]] = {}
+                for dialog in dialogs:
+                    if dialog.counterparty_id:
+                        identities.setdefault(dialog.counterparty_name.casefold(), set()).add(dialog.counterparty_id)
+                self._seller_identity_cache = identities
+            else:
+                identities = self._seller_identity_cache or {}
+            for nickname in nicknames:
+                matches = identities.get(nickname.casefold(), set())
+                if len(matches) != 1:
+                    attention.append(f"{nickname} — {'не найден точный профиль' if not matches else 'неоднозначно'}")
+                    continue
+                seller_id = next(iter(matches))
+                if seller_id not in self._verified_seller_ids:
+                    if using_cache:
+                        attention.append(f"{nickname} — повторная проверка временно ограничена")
+                        continue
+                    self.funpay.get_seller_lot_details(seller_id)
+                    self._verified_seller_ids.add(seller_id)
+                self._seller_batch_candidates[nickname.casefold()] = (seller_id, nickname)
+                exact.append(nickname)
+        except (FunPayRateLimited, FunPayAccessDenied):
+            self.request_budgets.fail("seller_lookup", severe=True)
+            raise RuntimeError("seller lookup stopped by FunPay safety response")
+        except FunPayError:
+            self.request_budgets.fail("seller_lookup")
+            raise RuntimeError("seller lookup is unavailable")
+        if not using_cache:
+            self.request_budgets.succeed("seller_lookup")
+        return SellerBatchPreviewView(tuple(exact), tuple(attention))
+
+    def competitor_mapping_overview(self) -> CompetitorMappingOverviewView:
+        checked, exact, attention, no_match = self._mapping_counts
+        return CompetitorMappingOverviewView(
+            checked, exact, attention, no_match,
+            tuple(MappingChoiceView(label, "Точное совпадение; подтвердите вручную", key)
+                  for key, label in self._mapping_labels()),
+        )
+
+    def minimum_price_overview(self) -> MinimumPriceOverviewView:
+        variants = tuple(
+            item.variant for item in self.own_mapping_repository.list()
+            if item.status is OwnMappingStatus.CONFIRMED and item.variant is not None
+        )
+        global_count, key_count, variant_count, covered = self.minimum_prices.counts(variants)
+        return MinimumPriceOverviewView(bool(global_count), key_count, variant_count, covered, len(variants))
+
+    def preview_minimum_price_batch(self, value: str) -> Mapping[int, int]:
+        parsed = parse_minimum_price_batch(value)
+        self._pending_floor_batch = dict(parsed)
+        return parsed
+
+    def readiness(self) -> ReadinessView:
+        self._update_readiness(
+            self._last_readiness.dry_run_ready, self._last_readiness.dry_run_blocked,
+            dry_run_success=None,
+        )
+        return self._last_readiness
+
     def family(self, family: str) -> FamilyView:
         if family != "Mythic+":
             raise ValueError("only Mythic+ is a managed service family")
@@ -361,31 +584,20 @@ class ProductionReadOnlyControlService:
         ) for item in self.seller_repository.list())
 
     def find_seller(self, nickname: str) -> SellerCandidateView | None:
-        clean = nickname.strip()
-        if not clean or len(clean) > 64 or "\r" in clean or "\n" in clean:
+        preview = self.find_sellers(nickname)
+        if len(preview.exact) != 1:
             return None
-        self._require_connected()
-        matches = {
-            dialog.counterparty_id for dialog in self.funpay.get_dialogs()
-            if dialog.counterparty_id and dialog.counterparty_name.casefold() == clean.casefold()
-        }
-        if len(matches) != 1:
+        clean = preview.exact[0]
+        candidate = self._seller_batch_candidates.get(clean.casefold())
+        if candidate is None:
             return None
-        stable_id = next(iter(matches))
-        try:
-            # fpx-engine has no supported nickname-search endpoint.  The exact
-            # dialog identity supplies the stable ID; this public profile read
-            # verifies that the ID is still resolvable before local confirmation.
-            self.funpay.get_seller_lot_details(stable_id)
-        except FunPayError:
-            return None
-        self._seller_candidates[clean.casefold()] = (stable_id, clean)
+        self._seller_candidates[clean.casefold()] = candidate
         return SellerCandidateView(clean, True)
 
     def mapping_choices(self) -> tuple[MappingChoiceView, ...]:
         return tuple(
-            MappingChoiceView(label, "Точное совпадение; подтвердите вручную")
-            for label in sorted(self._mapping_candidates)
+            MappingChoiceView(label, "Точное совпадение; подтвердите вручную", key)
+            for key, label in self._mapping_labels()
         )
 
     def health(self, *, force: bool = False) -> FunPayHealth:
@@ -425,17 +637,29 @@ class ProductionReadOnlyControlService:
 
     def refresh_lots(self, *, force_health: bool = False) -> bool:
         self._discovery_attempted = True
+        budget = self.request_budgets.claim("own_lot_read", cooldown_seconds=30)
+        if budget is not BudgetDecision.ALLOWED:
+            return bool(self.registry.list())
         if self.health(force=force_health).status is not FunPayReadStatus.CONNECTED:
+            self.request_budgets.fail("own_lot_read")
             return False
         try:
             summary = LotDiscovery(self.funpay, self.registry).run()
+            self._analyze_cached_own_lots()
         except FunPaySessionExpired:
+            self.request_budgets.fail("own_lot_read", severe=True)
             self._mark_session_expired()
             self._health = FunPayHealth(FunPayReadStatus.AUTHORIZATION_REQUIRED, self.clock())
             return False
-        except FunPayError:
+        except (FunPayRateLimited, FunPayAccessDenied):
+            self.request_budgets.fail("own_lot_read", severe=True)
             self._health = FunPayHealth(FunPayReadStatus.UNAVAILABLE, self.clock(), self._health.successful_read_at)
             return False
+        except FunPayError:
+            self.request_budgets.fail("own_lot_read")
+            self._health = FunPayHealth(FunPayReadStatus.UNAVAILABLE, self.clock(), self._health.successful_read_at)
+            return False
+        self.request_budgets.succeed("own_lot_read")
         self.session_guard.mark_authorized()
         self.states.save("funpay_own_lots", "ready", _now_label())
         self._health = FunPayHealth(FunPayReadStatus.CONNECTED, self.clock(), "только что")
@@ -481,6 +705,14 @@ class ProductionReadOnlyControlService:
         )
 
     def _default_minimum(self, registered: RegisteredLot) -> int | None:
+        try:
+            review = self.own_mapping_repository.get_by_opaque_key(opaque_lot_key(registered.details.lot_id))
+        except ValueError:
+            review = None
+        if review is not None and review.variant is not None:
+            configured = self.minimum_prices.resolve(review.variant)
+            if configured is not None:
+                return configured
         service_code = self._confirmed_service_code(registered.details.lot_id)
         candidates = (
             service_code, _classification_family(registered.classification.kind),
@@ -538,6 +770,7 @@ class ProductionReadOnlyControlService:
             self.controls.set_mode(lot.details.lot_id, OwnLotPricingMode(action.removeprefix("lot_")))
         else:
             raise RealOperationsDisabled("Реальные изменения FunPay пока не разрешены.")
+        self.request_budgets.clear_cooldown("price_observation")
 
     def _update_seller(self, action: str, payload: str | None) -> None:
         if action == "seller_add" and payload:
@@ -550,6 +783,20 @@ class ProductionReadOnlyControlService:
                 seller_id, confirmed_nickname,
                 verification_state=SellerVerificationState.VERIFIED,
             )
+            self._recheck_sellers()
+            self.request_budgets.clear_cooldown("price_observation")
+            return
+        if action == "seller_add_batch":
+            if not self._seller_batch_candidates:
+                raise ValueError("seller batch confirmation is stale")
+            for seller_id, confirmed_nickname in self._seller_batch_candidates.values():
+                self.seller_repository.add_seller(
+                    seller_id, confirmed_nickname,
+                    verification_state=SellerVerificationState.VERIFIED,
+                )
+            self._seller_batch_candidates = {}
+            self._recheck_sellers()
+            self.request_budgets.clear_cooldown("price_observation")
             return
         if action in {"seller_remove", "seller_disable"} and payload:
             matches = [item for item in self.seller_repository.list() if item.nickname == payload]
@@ -559,6 +806,7 @@ class ProductionReadOnlyControlService:
                 self.seller_repository.remove_seller(matches[0].seller_id)
             else:
                 self.seller_repository.disable_seller(matches[0].seller_id)
+            self.request_budgets.clear_cooldown("price_observation")
             return
         if action == "seller_remap" and payload:
             candidate = self._mapping_candidates.pop(payload, None)
@@ -566,8 +814,35 @@ class ProductionReadOnlyControlService:
                 raise ValueError("mapping selection is stale")
             snapshot, specs = candidate
             self.confirmations.confirm_match(snapshot, specs)
+            self.request_budgets.clear_cooldown("price_observation")
             return
         raise ValueError("seller action is incomplete")
+
+    def _update_minimum_price(self, action: str, payload: str | None) -> None:
+        if action == "floor_set_global" and payload:
+            self.minimum_prices.set_global(parse_minimum_price_batch(f"+1 {payload}")[1])
+            self.request_budgets.clear_cooldown("price_observation")
+            return
+        if action == "floor_set_key_batch":
+            if not self._pending_floor_batch:
+                raise ValueError("minimum-price preview is stale")
+            self.minimum_prices.apply_key_batch(self._pending_floor_batch)
+            self._pending_floor_batch = {}
+            self.request_budgets.clear_cooldown("price_observation")
+            return
+        if action == "floor_set_variant" and payload:
+            key, separator, amount = payload.partition(":")
+            if not separator:
+                raise ValueError("variant minimum price is incomplete")
+            review = self.own_mapping_repository.get_by_opaque_key(key)
+            if review.status is not OwnMappingStatus.CONFIRMED or review.variant is None:
+                raise ValueError("variant is not confirmed")
+            self.minimum_prices.set_variant(
+                review.variant.service_code, parse_minimum_price_batch(f"+1 {amount}")[1]
+            )
+            self.request_budgets.clear_cooldown("price_observation")
+            return
+        raise ValueError("minimum-price action is incomplete")
 
     def _service_specs(self) -> tuple[ServiceMatchSpec, ...]:
         lots = {item.details.lot_id: item for item in self.registry.list()}
@@ -587,34 +862,73 @@ class ProductionReadOnlyControlService:
         return tuple(result)
 
     def _recheck_sellers(self) -> None:
+        budget = self.request_budgets.claim("competitor_discovery", cooldown_seconds=30)
+        if budget is not BudgetDecision.ALLOWED:
+            return
         self._require_connected()
         specs = self._service_specs()
         matcher = SellerMatchingEngine()
         candidates: dict[str, tuple[CompetitorLotSnapshot, tuple[ServiceMatchSpec, ...]]] = {}
-        for seller in self.seller_repository.list():
-            if not seller.enabled or seller.verification_state is not SellerVerificationState.VERIFIED:
-                continue
-            try:
+        labels: dict[str, str] = {}
+        checked = exact = attention = no_match = 0
+        try:
+            for seller in self.seller_repository.list():
+                if not seller.enabled or seller.verification_state is not SellerVerificationState.VERIFIED:
+                    continue
                 details = self.funpay.get_seller_lot_details(seller.seller_id)
-            except FunPayError:
-                self.seller_repository.set_last_checked_state(seller.seller_id, SellerLastCheckedState.ERROR)
-                continue
-            changed = False
-            for index, detail in enumerate(details, start=1):
-                snapshot = _competitor_snapshot(detail)
-                changed = self.mapping_repository.invalidate_if_materially_changed(snapshot) or changed
-                if specs:
-                    assessment = matcher.match(snapshot, specs)
-                    if assessment.result is MatchResult.EXACT and assessment.service_code:
-                        label = f"{seller.nickname} • вариант {index} → {_service_label(assessment.service_code)}"
-                        candidates[label] = (snapshot, specs)
-            self.seller_repository.set_last_checked_state(
-                seller.seller_id, SellerLastCheckedState.CHANGED if changed else SellerLastCheckedState.CURRENT
-            )
+                changed = False
+                matches_by_code: dict[str, list[CompetitorLotSnapshot]] = {spec.service_code: [] for spec in specs}
+                partial_mythic = False
+                for detail in details:
+                    snapshot = _competitor_snapshot(detail)
+                    partial_mythic = partial_mythic or snapshot.key_level is not None
+                    changed = self.mapping_repository.invalidate_if_materially_changed(snapshot) or changed
+                    if specs:
+                        assessment = matcher.match(snapshot, specs)
+                        if assessment.result is MatchResult.EXACT and assessment.service_code:
+                            matches_by_code[assessment.service_code].append(snapshot)
+                for spec in specs:
+                    checked += 1
+                    matches = matches_by_code[spec.service_code]
+                    if len(matches) == 1:
+                        snapshot = matches[0]
+                        existing = self.mapping_repository.get(snapshot.seller_id, snapshot.lot_id)
+                        if existing is not None and existing.state.value == "confirmed" and existing.service_code == spec.service_code:
+                            continue
+                        key = "cmp-" + hashlib.sha256(
+                            f"{snapshot.seller_id}|{snapshot.lot_id}|{spec.service_code}".encode()
+                        ).hexdigest()[:16]
+                        candidates[key] = (snapshot, specs)
+                        labels[key] = f"{seller.nickname} • {_service_label(spec.service_code)}"
+                        exact += 1
+                    elif len(matches) > 1:
+                        attention += 1
+                    elif partial_mythic:
+                        attention += 1
+                    else:
+                        no_match += 1
+                self.seller_repository.set_last_checked_state(
+                    seller.seller_id, SellerLastCheckedState.CHANGED if changed else SellerLastCheckedState.CURRENT
+                )
+        except (FunPayRateLimited, FunPayAccessDenied):
+            self.request_budgets.fail("competitor_discovery", severe=True)
+            raise RuntimeError("competitor discovery stopped by FunPay safety response")
+        except FunPayError:
+            self.request_budgets.fail("competitor_discovery")
+            raise RuntimeError("competitor discovery is unavailable")
+        self.request_budgets.succeed("competitor_discovery")
         self._mapping_candidates = candidates
+        self._mapping_candidate_labels = labels
+        self._mapping_counts = checked, exact, attention, no_match
 
     def _run_price_check(self, only_lot_key: str | None) -> None:
+        budget = self.request_budgets.claim("price_observation", cooldown_seconds=30)
+        if budget is not BudgetDecision.ALLOWED:
+            if self._last_preview.changes or self._last_preview.skipped:
+                return
+            raise RuntimeError("price check is rate limited")
         self._require_connected()
+        self._analyze_cached_own_lots()
         actual = {item.details.lot_id: item for item in self.registry.list()}
         with self.database.session() as connection:
             own_rows = connection.execute("SELECT * FROM lot_service_mappings ORDER BY service_code").fetchall()
@@ -632,44 +946,90 @@ class ProductionReadOnlyControlService:
             ))
             self._last_calculations = {}
             self.states.save("read_only_price_check", "completed", _now_label())
+            self.request_budgets.succeed("price_observation")
+            self._update_readiness(0, 0, dry_run_success=False)
             return
         sellers = self.seller_repository.list()
         mappings = tuple(
             item for seller in sellers for item in self.mapping_repository.list_for_seller(seller.seller_id)
         )
-        details_by_seller: dict[str, dict[str, FunPayLotDetails]] = {}
-        for seller in sellers:
-            if seller.enabled and seller.verification_state is SellerVerificationState.VERIFIED:
-                try:
+        enabled_sellers = tuple(
+            item for item in sellers
+            if item.enabled and item.verification_state is SellerVerificationState.VERIFIED
+        )
+        enabled_seller_ids = {item.seller_id for item in enabled_sellers}
+        confirmed_mappings = tuple(
+            mapping for mapping in mappings
+            if mapping.state.value == "confirmed" and mapping.seller_id in enabled_seller_ids
+        )
+        sellers_by_service: dict[str, set[str]] = {}
+        for mapping in confirmed_mappings:
+            sellers_by_service.setdefault(mapping.service_code, set()).add(mapping.seller_id)
+        single_seller_codes = {
+            service_code for service_code, seller_ids in sellers_by_service.items() if len(seller_ids) == 1
+        }
+        mapped_seller_ids = {mapping.seller_id for mapping in confirmed_mappings}
+        repeated_seller_ids = {
+            mapping.seller_id for mapping in confirmed_mappings
+            if mapping.service_code in single_seller_codes
+        }
+        repetitions = 3 if repeated_seller_ids else 1
+        records_by_mapping: dict[tuple[str, str], list[PriceObservationRecord]] = {}
+        all_new_records: list[PriceObservationRecord] = []
+        next_sequences = {
+            (mapping.seller_id, mapping.competitor_lot_id):
+                self.observation_history.next_sequence(mapping.seller_id, mapping.competitor_lot_id)
+            for mapping in confirmed_mappings
+        }
+        try:
+            for repetition in range(repetitions):
+                seller_ids_to_read = mapped_seller_ids if repetition == 0 else repeated_seller_ids
+                details_by_seller: dict[str, dict[str, FunPayLotDetails]] = {}
+                for seller in enabled_sellers:
+                    if seller.seller_id not in seller_ids_to_read:
+                        continue
                     details_by_seller[seller.seller_id] = {
                         item.lot_id: item for item in self.funpay.get_seller_lot_details(seller.seller_id)
                     }
-                except FunPayError:
-                    details_by_seller[seller.seller_id] = {}
-        current_records: list[PriceObservationRecord] = []
-        for mapping in mappings:
-            detail = details_by_seller.get(mapping.seller_id, {}).get(mapping.competitor_lot_id)
-            if detail is None:
-                continue
-            snapshot = _competitor_snapshot(detail)
-            self.mapping_repository.invalidate_if_materially_changed(snapshot)
-            sequence = self.observation_history.next_sequence(mapping.seller_id, mapping.competitor_lot_id)
-            observation_id = "obs-" + hashlib.sha256(
-                f"{mapping.seller_id}|{mapping.competitor_lot_id}|{sequence}".encode("utf-8")
-            ).hexdigest()[:24]
-            current_records.append(PriceObservationRecord(
-                observation_id,
-                TrustedPriceObservation(
-                    mapping.seller_id, mapping.competitor_lot_id, mapping.service_code,
-                    detail.price_minor, detail.currency,
-                ),
-                mapping.material_snapshot_hash, mapping.service_code, sequence,
-            ))
+                for mapping in confirmed_mappings:
+                    if repetition > 0 and mapping.service_code not in single_seller_codes:
+                        continue
+                    detail = details_by_seller.get(mapping.seller_id, {}).get(mapping.competitor_lot_id)
+                    if detail is None:
+                        continue
+                    snapshot = _competitor_snapshot(detail)
+                    self.mapping_repository.invalidate_if_materially_changed(snapshot)
+                    sequence_key = (mapping.seller_id, mapping.competitor_lot_id)
+                    sequence = next_sequences[sequence_key]
+                    next_sequences[sequence_key] += 1
+                    observation_id = "obs-" + hashlib.sha256(
+                        f"{mapping.seller_id}|{mapping.competitor_lot_id}|{sequence}".encode("utf-8")
+                    ).hexdigest()[:24]
+                    record = PriceObservationRecord(
+                        observation_id,
+                        TrustedPriceObservation(
+                            mapping.seller_id, mapping.competitor_lot_id, mapping.service_code,
+                            detail.price_minor, detail.currency,
+                        ),
+                        mapping.material_snapshot_hash, mapping.service_code, sequence,
+                    )
+                    records_by_mapping.setdefault(
+                        (mapping.seller_id, mapping.competitor_lot_id), []
+                    ).append(record)
+                    all_new_records.append(record)
+        except (FunPayRateLimited, FunPayAccessDenied, FunPaySessionExpired):
+            self.request_budgets.fail("price_observation", severe=True)
+            raise RuntimeError("price observation stopped by FunPay safety response")
+        except FunPayError:
+            self.request_budgets.fail("price_observation")
+            raise RuntimeError("price observation is unavailable")
+        current_records = [records[-1] for records in records_by_mapping.values() if records]
+        prior_records = [record for records in records_by_mapping.values() for record in records[:-1]]
         # Invalidation may have changed mapping states; load them again before validation.
         mappings = tuple(
             item for seller in sellers for item in self.mapping_repository.list_for_seller(seller.seller_id)
         )
-        history = self.observation_history.list()
+        history = self.observation_history.list() + tuple(prior_records)
         own_states: list[OwnLotPriceState] = []
         policies: dict[str, PricePolicy] = {}
         skipped: list[PriceSkipView] = []
@@ -691,6 +1051,9 @@ class ProductionReadOnlyControlService:
         )
         changes: list[PriceChangeView] = []
         calculations: dict[str, str] = {}
+        ready_count = 0
+        emergency = self.states.load("emergency_stop")
+        emergency_active = bool(emergency and emergency[0] == "active")
         for item in decisions:
             decision, consensus = item.price_decision, item.consensus
             lot = selected_by_code[decision.service_code]
@@ -708,12 +1071,86 @@ class ProductionReadOnlyControlService:
                 reason = consensus.reason if consensus.status is not SafetyDecisionStatus.VALID else decision.reason
                 calculations[key] = f"Цена сохранена без изменений: {reason}."
                 skipped.append(PriceSkipView(lot.details.title[:120], _safe_reason(reason)))
+            control = self.controls.get(lot.details.lot_id)
+            review = self.own_mapping_repository.get_by_opaque_key(opaque_lot_key(lot.details.lot_id))
+            competitor_current = any(
+                mapping.service_code == decision.service_code and mapping.state.value == "confirmed"
+                for mapping in mappings
+            )
+            eligibility = self.eligibility.evaluate(
+                family="mythic_plus",
+                own_mapping_confirmed=review.status is OwnMappingStatus.CONFIRMED,
+                own_fingerprint_current=review.status is OwnMappingStatus.CONFIRMED,
+                mode=control.mode,
+                minimum_exists=policies[decision.service_code].hard_floor is not None,
+                valid_reference_exists=decision.minimum_valid_price_minor is not None,
+                competitor_mappings_current=competitor_current,
+                suspicious=consensus.status is not SafetyDecisionStatus.VALID,
+                session_authorized=self.health().status is FunPayReadStatus.CONNECTED,
+                emergency_stop=emergency_active,
+                future_live_capability_enabled=False,
+            )
+            ready_count += eligibility.eligible_for_future_test
         if batch.status is SafetyDecisionStatus.REJECTED:
             skipped.append(PriceSkipView("Пакет", "массовое подозрительное изменение заблокировано"))
         self._last_calculations = calculations
         self._last_preview = PricePreviewView(tuple(changes), tuple(skipped))
-        self.observation_history.save(tuple(current_records))
+        self.observation_history.save(tuple(all_new_records))
         self.states.save("read_only_price_check", "completed", _now_label())
+        self.request_budgets.succeed("price_observation")
+        self._update_readiness(ready_count, len(selected) - ready_count, dry_run_success=True)
+
+    def _analyze_cached_own_lots(self):
+        return self.own_mapping_repository.analyze(tuple(item.details for item in self.registry.list()))
+
+    def _mapping_labels(self) -> tuple[tuple[str, str], ...]:
+        return tuple(sorted(self._mapping_candidate_labels.items(), key=lambda item: item[1].casefold()))
+
+    def _update_readiness(self, ready: int, blocked: int, *, dry_run_success: bool | None) -> None:
+        summary = self.own_mapping_repository.summary()
+        sellers = tuple(
+            item for item in self.seller_repository.list()
+            if item.enabled and item.verification_state is SellerVerificationState.VERIFIED
+        )
+        mappings = tuple(
+            item for seller in sellers for item in self.mapping_repository.list_for_seller(seller.seller_id)
+        )
+        confirmed_mappings = sum(item.state.value == "confirmed" for item in mappings)
+        recheck_mappings = sum(item.state.value != "confirmed" for item in mappings)
+        variants = tuple(
+            item.variant for item in summary.reviews
+            if item.status is OwnMappingStatus.CONFIRMED and item.variant is not None
+        )
+        _, _, _, covered = self.minimum_prices.counts(variants)
+        mapping_attention = summary.total - summary.confirmed - summary.excluded
+        competitor_attention = recheck_mappings + self._mapping_counts[2] + self._mapping_counts[3]
+        self._last_readiness = ReadinessView(
+            summary.confirmed, mapping_attention, len(sellers), confirmed_mappings,
+            competitor_attention, covered, ready, blocked, False,
+        )
+        self._persist_readiness(self._last_readiness, dry_run_success=dry_run_success)
+
+    def _persist_readiness(self, view: ReadinessView, *, dry_run_success: bool | None = None) -> None:
+        mutation_attempts = self.mutation_trap.attempts if self.mutation_trap is not None else 0
+        if mutation_attempts:
+            raise OnboardingMutationBlocked("read-only onboarding mutation trap was triggered")
+        with self.database.session() as connection:
+            existing = connection.execute(
+                "SELECT dry_run_success FROM read_only_readiness_state WHERE singleton_id=1"
+            ).fetchone()
+            success = int(dry_run_success) if dry_run_success is not None else int(existing["dry_run_success"] if existing else 0)
+            connection.execute(
+                """UPDATE read_only_readiness_state SET own_lots_available=?,confirmed_own_mappings=?,
+                own_mappings_attention=?,trusted_sellers=?,confirmed_competitor_mappings=?,
+                competitor_mappings_attention=?,lots_with_minimum_prices=?,dry_run_success=?,
+                dry_run_ready=?,dry_run_blocked=?,mutation_attempts=0,secrets_exposed=0,
+                updated_at=CURRENT_TIMESTAMP WHERE singleton_id=1""",
+                (
+                    int(bool(self.registry.list())), view.confirmed_lots, view.mapping_attention,
+                    view.trusted_sellers, view.confirmed_competitor_mappings, view.competitor_attention,
+                    view.minimum_prices_covered, success, view.dry_run_ready, view.dry_run_blocked,
+                ),
+            )
 
 
 def _positive_minor(value: int) -> None:
@@ -781,8 +1218,9 @@ def _lot_warning(lot: RegisteredLot, minimum: int | None, service_code: str | No
 
 
 def _competitor_snapshot(details: FunPayLotDetails) -> CompetitorLotSnapshot:
-    classification = classify_wow_lot(details)
-    family = SellerFamily.MYTHIC_PLUS if classification.kind == "mythic_plus" else None
+    parsed = parse_mythic_lot(details)
+    variant = parsed.variant
+    family = SellerFamily.MYTHIC_PLUS if variant is not None else None
     public_fields = {
         name: value for name, value in {
             "short_description": details.short_description,
@@ -791,8 +1229,9 @@ def _competitor_snapshot(details: FunPayLotDetails) -> CompetitorLotSnapshot:
     }
     return CompetitorLotSnapshot(
         details.seller_id, details.lot_id, details.title, family, details.category_node_id,
-        classification.region, classification.key_level, classification.service_format,
-        classification.package_size, {}, public_fields, {},
+        variant.region if variant else None, variant.key_level if variant else None,
+        variant.service_format if variant else None, variant.package_size if variant else None,
+        variant.conditions if variant else None, public_fields, {},
     )
 
 
