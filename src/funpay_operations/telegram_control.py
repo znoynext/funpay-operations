@@ -39,6 +39,7 @@ CONTROL_MENU = {
         ["⚔️ Mythic+"],
         ["💰 Цены", "💬 Сообщения"],
         ["👥 Продавцы", "📦 Лоты"],
+        ["🔍 Проверить FunPay"],
         ["🔄 Обновить и поднять"],
         ["⚙️ Настройки"],
     ],
@@ -59,6 +60,7 @@ class ControlService(Protocol):
     def sellers(self) -> tuple[TrustedSellerView, ...]: ...
     def find_seller(self, nickname: str) -> SellerCandidateView | None: ...
     def mapping_choices(self) -> tuple[MappingChoiceView, ...]: ...
+    def probe_status(self) -> str: ...
 
 
 @dataclass(frozen=True)
@@ -82,6 +84,7 @@ class MockControlService:
     _lots: dict[str, LotView] = field(default_factory=dict)
     _sellers: list[TrustedSellerView] = field(default_factory=list)
     external_mutations_allowed: bool = True
+    _probe_status: str = "🔍 Безопасная проверка FunPay\n\nПроверка ещё не запускалась."
 
     def __post_init__(self) -> None:
         if not self._lots:
@@ -107,6 +110,9 @@ class MockControlService:
 
     def execute(self, action: str, payload: str | None = None) -> str:
         self.calls.append((action, payload))
+        if action == "run_probe":
+            self._probe_status = "🔍 Проверяю FunPay…\n\nНичего на FunPay не изменяется."
+            return "accepted"
         if action in {"lot_automatic", "lot_fixed_price", "lot_paused", "lot_check_only"} and payload in self._lots:
             self._lots[payload] = replace(self._lots[payload], mode=action.removeprefix("lot_"))
         if action == "lot_set_fixed" and payload:
@@ -180,6 +186,9 @@ class MockControlService:
             MappingChoiceView("Mythic+ +10 package", "EU • Self-play • x3"),
         )
 
+    def probe_status(self) -> str:
+        return self._probe_status
+
 
 def _status(label: str, value: str):
     from .telegram_views import StatusView
@@ -229,6 +238,7 @@ class TelegramControlRouter:
         "💰 цены": _Intent("prices"), "💬 сообщения": _Intent("messages"),
         "👥 продавцы": _Intent("sellers"), "trusted sellers": _Intent("sellers"),
         "📦 лоты": _Intent("lots"), "🔄 обновить и поднять": _Intent("update_raise_preview"),
+        "🔍 проверить funpay": _Intent("probe"), "проверить funpay": _Intent("probe"),
         "⚙️ настройки": _Intent("settings"), "статус": _Intent("home"),
         "/start": _Intent("home"), "/status": _Intent("home"),
         "обновить цены": _Intent("price_preview"), "проверить цены": _Intent("check_prices"),
@@ -257,6 +267,8 @@ class TelegramControlRouter:
                     "Данные сессии вводятся только локально, без отображения в чате.",
                     edit_message=True,
                 )
+            if update.callback_data == "probe:status":
+                return self._dispatch_safe(update.user_id, _Intent("probe_status"), edit=True)
             return self._callback(update.user_id, update.callback_data)
         text = (update.text or "").strip()
         if not text:
@@ -363,6 +375,10 @@ class TelegramControlRouter:
             return self._messages_screen(user_id, edit=edit)
         if action == "settings":
             return self._settings_screen(user_id, edit=edit)
+        if action == "probe":
+            return self._probe_screen(user_id, start=True, edit=edit)
+        if action == "probe_status":
+            return self._probe_screen(user_id, start=False, edit=edit)
         if action == "automation":
             return self._automation_screen(user_id, edit=edit)
         if action == "notifications":
@@ -438,6 +454,7 @@ class TelegramControlRouter:
             [("⚔️ Mythic+", _Intent("family", "Mythic+"))],
             [("💰 Цены", _Intent("prices")), ("💬 Сообщения", _Intent("messages"))],
             [("👥 Продавцы", _Intent("sellers")), ("📦 Лоты", _Intent("lots"))],
+            [("🔍 Проверить FunPay", _Intent("probe"))],
             [("⚙️ Настройки", _Intent("settings"))],
         ]
         if self._writes_available():
@@ -544,10 +561,30 @@ class TelegramControlRouter:
              ("Автоответ" if self._writes_available() else "Автоответ 🔒", _Intent("auto_reply_toggle"))],
             [("Уведомления", _Intent("notifications")), ("Каталог услуг", _Intent("catalog"))],
             [("Минимальные цены", _Intent("lots")), ("Диагностика", _Intent("diagnostics"))],
+            [("🔍 Проверить FunPay", _Intent("probe"))],
             [("Информация о боте", _Intent("about"))],
             [("⚠️ Emergency stop", _Intent("emergency_preview"))],
             _nav(),
         ], edit=edit)
+
+    def _probe_screen(self, user_id: int, *, start: bool, edit: bool) -> CommandReply:
+        notice = ""
+        if start:
+            outcome = self._run("run_probe")
+            notice = {
+                "accepted": "🔍 Проверяю FunPay…\n\n",
+                "already_running": "🔍 Проверка уже выполняется.\n\n",
+                "rate_limited": "⏳ Проверка запускалась недавно. Попробуйте позже.\n\n",
+            }.get(outcome, "")
+        return self._render(
+            user_id,
+            notice + self.services.probe_status(),
+            [
+                [("Обновить статус", _Intent("probe_status"))],
+                _nav(_Intent("settings")),
+            ],
+            edit=edit,
+        )
 
     def _automation_screen(self, user_id: int, *, edit: bool) -> CommandReply:
         if not self._writes_available():

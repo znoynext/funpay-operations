@@ -31,7 +31,7 @@ class DatabaseTests(unittest.TestCase):
         with self.database.session() as connection:
             connection.execute("INSERT INTO lots (external_id, title, price_minor, currency) VALUES (?, ?, ?, ?)", ("legacy", "Legacy", 1, "RUB"))
         self.database.apply_migrations()
-        self.assertEqual(self.database.applied_migrations(), (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12))
+        self.assertEqual(self.database.applied_migrations(), (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13))
         with self.database.session() as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM lots").fetchone()[0], 1)
 
@@ -51,10 +51,8 @@ class DatabaseTests(unittest.TestCase):
             connection.execute(
                 "INSERT INTO lots (external_id, title, price_minor, currency) VALUES ('kept', 'Kept', 1, 'RUB')"
             )
-            connection.execute("DROP INDEX idx_read_only_observations_service")
-            connection.execute("DROP TABLE read_only_price_observations")
-            connection.execute("DROP TABLE lot_control_settings")
-            connection.execute("DELETE FROM schema_migrations WHERE version = 12")
+            connection.execute("DROP TABLE read_only_probe_state")
+            connection.execute("DELETE FROM schema_migrations WHERE version = 13")
 
         database.initialize()
 
@@ -66,7 +64,7 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(copy.execute("SELECT COUNT(*) FROM lots WHERE external_id = 'kept'").fetchone()[0], 1)
         finally:
             copy.close()
-        self.assertEqual(database.applied_migrations()[-1], 12)
+        self.assertEqual(database.applied_migrations()[-1], 13)
         database.check_integrity()
 
     def test_repositories_prevent_duplicate_events_messages_and_snapshots(self) -> None:

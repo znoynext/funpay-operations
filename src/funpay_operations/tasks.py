@@ -40,12 +40,14 @@ class BackgroundRunner:
         telegram_enabled: bool | None = None,
         session_validation: Callable[[], object] | None = None,
         read_model_refresh: Callable[[], object] | None = None,
+        read_only_probe: Callable[[], object] | None = None,
     ) -> None:
         self.settings, self.database, self.logger = settings, database, logger
         self.funpay, self.telegram, self.notifications = funpay, telegram, notifications
         self.session_guard, self.session_expired_callback = session_guard, session_expired_callback
         self.telegram_enabled = settings.telegram_enabled if telegram_enabled is None else telegram_enabled
         self.session_validation, self.read_model_refresh = session_validation, read_model_refresh
+        self.read_only_probe = read_only_probe
         self.runtime_states = TaskStateRepository(database)
         self._shutdown_requested = asyncio.Event()
         disabled = DisabledAdapter()
@@ -71,6 +73,7 @@ class BackgroundRunner:
                 BackgroundTask("recovery-coordinator", disabled.run, settings.poll_interval_seconds),
                 BackgroundTask("sqlite-maintenance", self._maintain_storage, settings.backup_interval_seconds),
                 BackgroundTask("runtime-control", self._check_shutdown_request, 0.5),
+                BackgroundTask("read-only-funpay-probe", self._run_read_only_probe, 0.5),
             ),
             logger=logger,
             backoff=ExponentialBackoff(settings.reconnect_initial_seconds, settings.reconnect_max_seconds),
@@ -153,6 +156,12 @@ class BackgroundRunner:
     async def _maintain_storage(self) -> None:
         await asyncio.to_thread(self.maintenance.integrity_check)
         await asyncio.to_thread(self.maintenance.backup)
+
+    async def _run_read_only_probe(self) -> TaskDisposition | None:
+        if self.read_only_probe is None:
+            return TaskDisposition.DISABLED
+        await asyncio.to_thread(self.read_only_probe)
+        return None
 
     async def _check_shutdown_request(self) -> None:
         current = self.runtime_states.load("background_control")

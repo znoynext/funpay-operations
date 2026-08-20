@@ -13,6 +13,7 @@ from funpay_operations.setup_services import FunPaySetupService, TelegramSetupSe
 from funpay_operations.telegram import TelegramBotProfile, TelegramError, TelegramUpdate
 from funpay_operations.database import Database
 from funpay_operations.repositories import TaskStateRepository
+from funpay_operations.read_only_probe import ProbeState, ReadOnlyProbeRepository
 from funpay_operations.windows_infra import resolve_windows_paths
 
 
@@ -199,3 +200,28 @@ class SetupCenterServiceTests(unittest.TestCase):
             self.assertTrue(controller.save_minimum_price("Mythic+ +10", "1000").ok)
             self.assertTrue(controller.restart_background().ok)
             self.assertEqual(restarted, [Path("background.exe")])
+
+    def test_probe_trigger_queues_only_a_local_sanitized_command(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = resolve_windows_paths(Path(directory))
+            controller = SetupCenterController(paths)
+
+            outcome = controller.request_funpay_probe()
+
+            self.assertTrue(outcome.ok)
+            self.assertIn("Проверяю FunPay", outcome.message)
+            state = ReadOnlyProbeRepository(Database(paths.database)).load()
+            self.assertEqual(state.state, ProbeState.REQUESTED)
+            self.assertIn("Проверяю FunPay", controller.funpay_probe_status())
+            source = (Path(__file__).parents[1] / "src" / "funpay_operations" / "setup_center.py").read_text(
+                encoding="utf-8"
+            )
+            self.assertNotIn("SecretStore", source)
+
+    def test_setup_probe_duplicate_is_blocked_without_secret_access(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            controller = SetupCenterController(resolve_windows_paths(Path(directory)))
+            self.assertTrue(controller.request_funpay_probe().ok)
+            duplicate = controller.request_funpay_probe()
+            self.assertFalse(duplicate.ok)
+            self.assertIn("уже выполняется", duplicate.message)

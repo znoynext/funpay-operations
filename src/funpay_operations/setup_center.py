@@ -12,6 +12,13 @@ import webbrowser
 
 from .setup_services import FunPaySetupService, SetupOutcome, TelegramOwnerCandidate, TelegramSetupService
 from .runtime import DuplicateProcessError, SingletonProcessLock
+from .database import Database
+from .read_only_probe import (
+    ProbeRequestResult,
+    ProbeState,
+    ReadOnlyProbeRepository,
+    render_safe_probe_result,
+)
 from .webview_auth import WebView2AuthLauncher
 from .windows_infra import (
     WindowsPaths,
@@ -151,6 +158,36 @@ class SetupCenterController:
             return None
         return value if isinstance(value, str) and value.strip() else None
 
+    def request_funpay_probe(self) -> SetupOutcome:
+        """Queue only a sanitized command; this process never reads DPAPI."""
+
+        try:
+            database = Database(self.paths.database)
+            database.initialize()
+            status = ReadOnlyProbeRepository(database).request()
+        except (OSError, sqlite3.Error, RuntimeError, ValueError):
+            return SetupOutcome(False, "Не удалось передать проверку фоновому приложению.")
+        if status is ProbeRequestResult.ACCEPTED:
+            return SetupOutcome(True, "🔍 Проверяю FunPay… Ничего на FunPay не изменяется.")
+        if status is ProbeRequestResult.ALREADY_RUNNING:
+            return SetupOutcome(False, "Проверка FunPay уже выполняется.")
+        return SetupOutcome(False, "Проверка запускалась недавно. Попробуйте позже.")
+
+    def funpay_probe_status(self) -> str:
+        try:
+            database = Database(self.paths.database)
+            database.initialize()
+            return render_safe_probe_result(ReadOnlyProbeRepository(database).load())
+        except (OSError, sqlite3.Error, RuntimeError, ValueError):
+            return "⚠️ Не удалось безопасно прочитать состояние проверки."
+
+    def funpay_probe_running(self) -> bool:
+        try:
+            state = ReadOnlyProbeRepository(Database(self.paths.database)).load().state
+        except (OSError, sqlite3.Error, RuntimeError, ValueError):
+            return False
+        return state in {ProbeState.REQUESTED, ProbeState.RUNNING}
+
 
 class SetupCenterWindow:
     """Thin tkinter view delegating all decisions to ``SetupCenterController``."""
@@ -173,6 +210,7 @@ class SetupCenterWindow:
         ).grid(row=0, column=0, sticky="w")
         ttk.Label(frame, textvariable=self._status, justify="left").grid(row=1, column=0, sticky="w", pady=(14, 14))
         buttons = (
+            ("🔍 Проверить FunPay", self._open_funpay_probe),
             ("🔐 Подключить FunPay", self._open_funpay),
             ("🤖 Подключить Telegram", self._open_telegram),
             ("📦 Услуги", self._open_catalog),
@@ -227,6 +265,43 @@ class SetupCenterWindow:
         self.ttk.Button(frame, text="Отмена", command=window.destroy).grid(row=advanced_row + 1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         if start_login and not connected:
             window.after(0, lambda: self._begin_funpay_authorization(window))
+
+    def _open_funpay_probe(self) -> None:
+        window = self.tk.Toplevel(self.root)
+        window.title("Безопасная проверка FunPay")
+        frame = self.ttk.Frame(window, padding=16)
+        frame.grid(sticky="nsew")
+        self.ttk.Label(
+            frame, text="🔍 Безопасная проверка FunPay", font=("Segoe UI", 14, "bold")
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+        status = self.tk.StringVar(value=self.controller.funpay_probe_status())
+        self.ttk.Label(frame, textvariable=status, justify="left").grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(10, 12)
+        )
+
+        def start() -> None:
+            outcome = self.controller.request_funpay_probe()
+            status.set(outcome.message if outcome.ok else f"⚠️ {outcome.message}")
+            if outcome.ok:
+                poll()
+
+        def poll() -> None:
+            if not window.winfo_exists():
+                return
+            status.set(self.controller.funpay_probe_status())
+            if self.controller.funpay_probe_running():
+                window.after(500, poll)
+            else:
+                self.refresh()
+
+        self.ttk.Button(frame, text="🔍 Проверить FunPay", command=start).grid(
+            row=2, column=0, sticky="ew"
+        )
+        self.ttk.Button(frame, text="Готово", command=window.destroy).grid(
+            row=2, column=1, sticky="ew", padx=(8, 0)
+        )
+        if self.controller.funpay_probe_running():
+            poll()
 
     def _verify_funpay(self, window: object) -> None:
         self._run_funpay_operation(window, self.controller.verify_funpay)
@@ -425,6 +500,7 @@ def main(argv: list[str] | None = None) -> int:
         help="initialize the packaged Tcl/Tk runtime without showing a window",
     )
     parser.add_argument("--funpay-auth", action="store_true", help="open only the local user-driven FunPay authorization flow")
+    parser.add_argument("--probe", action="store_true", help="open the safe read-only FunPay probe screen")
     args = parser.parse_args(argv)
     from .windows_infra import resolve_windows_paths
 
@@ -443,6 +519,8 @@ def main(argv: list[str] | None = None) -> int:
     window = SetupCenterWindow(root, controller)
     if args.funpay_auth:
         root.after(0, lambda: window._open_funpay(start_login=True))
+    elif args.probe:
+        root.after(0, window._open_funpay_probe)
     root.mainloop()
     return 0
 
