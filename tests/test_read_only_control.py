@@ -124,7 +124,7 @@ class ProductionReadOnlyControlTests(unittest.TestCase):
 
         dashboard = service.dashboard(emergency_active=False)
 
-        self.assertEqual((dashboard.mythic_lots, dashboard.unknown_lots, dashboard.ambiguous_lots), (1, 1, 0))
+        self.assertEqual((dashboard.mythic_lots, dashboard.unknown_lots, dashboard.ambiguous_lots), (0, 2, 0))
         self.assertEqual(client.calls, list(calls_after_probe))
         self.assertNotIn("private", repr(dashboard))
 
@@ -164,6 +164,15 @@ class ProductionReadOnlyControlTests(unittest.TestCase):
             with self.subTest(action=action), self.assertRaises(RealOperationsDisabled):
                 service.execute(action)
 
+    def test_empty_price_check_is_not_recorded_as_real_dry_run_success(self) -> None:
+        service = self.service(MockFunPayClient())
+        service.execute("check_prices")
+        with self.database.session() as connection:
+            state = connection.execute(
+                "SELECT dry_run_success FROM read_only_readiness_state WHERE singleton_id=1"
+            ).fetchone()
+        self.assertEqual(state["dry_run_success"], 0)
+
     def test_production_router_hides_mutations_and_stale_write_intent_is_blocked(self) -> None:
         service = self.service(MockFunPayClient())
         router = TelegramControlRouter((10,), self.states, service, EmergencyStopGate(self.states))
@@ -194,7 +203,8 @@ class ProductionReadOnlyControlTests(unittest.TestCase):
         self.assertEqual([(item.nickname, item.family, item.verified) for item in sellers], [
             ("ExactSeller", "Mythic+", True),
         ])
-        self.assertEqual(client.calls.count("get_seller_lot_details"), 1)
+        # One exact identity verification plus automatic controlled competitor discovery.
+        self.assertEqual(client.calls.count("get_seller_lot_details"), 2)
 
     def test_seller_lookup_rejects_ambiguous_stable_identity(self) -> None:
         service = self.service(MockFunPayClient(dialogs=(
@@ -255,9 +265,8 @@ class ProductionReadOnlyControlTests(unittest.TestCase):
         lot_key = service.lots()[0].key
         service.execute("lot_set_floor", f"{lot_key}:1000")
         service.execute("check_prices")
-        awaiting = service.price_preview()
-        self.assertEqual(awaiting.changes, ())
-        service.execute("check_prices")
+        # A manual dry-run performs the bounded consecutive reads required for
+        # a single trusted seller in the same user action.
         accepted = service.price_preview()
         self.assertEqual(len(accepted.changes), 1)
         self.assertEqual(accepted.changes[0].target_minor, 148_500)

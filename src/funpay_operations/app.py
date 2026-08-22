@@ -10,7 +10,11 @@ from .funpay import DisabledFunPayReplyClient, build_read_client
 from .logging_setup import configure_logging
 from .notifications import FunPayMessageNotifier
 from .replies import FunPayReplyRouter
-from .read_only_control import ProductionReadOnlyControlService
+from .read_only_control import (
+    OnboardingMutationTrap,
+    OnboardingReadBoundary,
+    ProductionReadOnlyControlService,
+)
 from .read_only_probe import (
     ProbeErrorCode,
     ProbeMutationTrap,
@@ -67,11 +71,14 @@ class Application:
         self.emergency_stop = EmergencyStopGate(self.task_states)
         self.task_states.save("funpay_auto_reply", "disabled")
         self.local_funpay_auth = LocalFunPayAuthRequest(resolve_windows_paths(), self.task_states)
+        self.onboarding_trap = OnboardingMutationTrap()
+        self.onboarding_reads = OnboardingReadBoundary(self.funpay, self.onboarding_trap)
         self.control_service = ProductionReadOnlyControlService(
-            self.database, self.funpay, settings, self.task_states, self.session_guard,
+            self.database, self.onboarding_reads, settings, self.task_states, self.session_guard,
             telegram_configured=self.telegram_enabled and confirmed_owner is not None, logger=self.logger,
             session_expired_callback=self._notify_funpay_session_expired,
             probe_repository=self.probe_repository,
+            mutation_trap=self.onboarding_trap,
         )
         self.telegram.set_interaction_router(
             CompositeTelegramRouter(

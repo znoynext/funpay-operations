@@ -31,7 +31,7 @@ class DatabaseTests(unittest.TestCase):
         with self.database.session() as connection:
             connection.execute("INSERT INTO lots (external_id, title, price_minor, currency) VALUES (?, ?, ?, ?)", ("legacy", "Legacy", 1, "RUB"))
         self.database.apply_migrations()
-        self.assertEqual(self.database.applied_migrations(), (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13))
+        self.assertEqual(self.database.applied_migrations(), (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14))
         with self.database.session() as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM lots").fetchone()[0], 1)
 
@@ -64,7 +64,38 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(copy.execute("SELECT COUNT(*) FROM lots WHERE external_id = 'kept'").fetchone()[0], 1)
         finally:
             copy.close()
-        self.assertEqual(database.applied_migrations()[-1], 13)
+        self.assertEqual(database.applied_migrations()[-1], 14)
+        database.check_integrity()
+
+    def test_mythic_onboarding_migration_preserves_legacy_registry_and_creates_backup(self) -> None:
+        root = Path(self.temporary_directory.name) / "onboarding-migration"
+        database = Database(root / "data" / "state.sqlite3")
+        database.initialize()
+        with database.session() as connection:
+            connection.execute(
+                """INSERT INTO own_lot_registry
+                (external_id,title,price_minor,currency,editor_fields_json,editor_options_json,
+                 omitted_field_names_json,available_field_names_json,classification,mapping_state,service_data_json)
+                VALUES('legacy-local-only','Legacy',1,'RUB','{}','{}','[]','[]','unknown','unmapped','{}')"""
+            )
+            for table in (
+                "own_lot_mapping_reviews", "mythic_minimum_prices",
+                "read_only_request_budgets", "read_only_readiness_state",
+            ):
+                connection.execute(f"DROP TABLE {table}")
+            connection.execute("DELETE FROM schema_migrations WHERE version=14")
+
+        database.initialize()
+
+        self.assertEqual(len(tuple((root / "backups").glob("state.pre-migration.*.sqlite3"))), 1)
+        with database.session() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM own_lot_registry WHERE external_id='legacy-local-only'"
+                ).fetchone()[0],
+                1,
+            )
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM read_only_readiness_state").fetchone()[0], 1)
         database.check_integrity()
 
     def test_repositories_prevent_duplicate_events_messages_and_snapshots(self) -> None:

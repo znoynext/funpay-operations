@@ -406,6 +406,65 @@ MIGRATIONS: tuple[Migration, ...] = (
             (singleton_id, state, build_sha, schema_version) VALUES (1, 'idle', 'unknown', 13)""",
         ),
     ),
+    (
+        14,
+        "Mythic+ read-only onboarding and readiness",
+        (
+            """CREATE TABLE IF NOT EXISTS own_lot_mapping_reviews (
+                external_lot_id TEXT PRIMARY KEY REFERENCES own_lot_registry(external_id) ON DELETE CASCADE,
+                opaque_key TEXT NOT NULL UNIQUE,
+                canonical_code TEXT,
+                variant_json TEXT,
+                confidence TEXT NOT NULL CHECK (confidence IN ('high', 'medium', 'low')),
+                status TEXT NOT NULL CHECK (status IN ('candidate', 'confirmed', 'recheck_required', 'excluded')),
+                evidence_json TEXT NOT NULL,
+                missing_fields_json TEXT NOT NULL,
+                ambiguity_json TEXT NOT NULL,
+                material_fingerprint TEXT NOT NULL,
+                source_fingerprint TEXT NOT NULL,
+                source TEXT NOT NULL CHECK (source IN ('automatic', 'manual')),
+                mapping_version INTEGER NOT NULL DEFAULT 0 CHECK (mapping_version >= 0),
+                confirmed_at TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_own_mapping_review_status ON own_lot_mapping_reviews(status, confidence)",
+            """CREATE TABLE IF NOT EXISTS mythic_minimum_prices (
+                scope TEXT NOT NULL CHECK (scope IN ('global', 'key', 'variant')),
+                scope_key TEXT NOT NULL,
+                amount_minor INTEGER NOT NULL CHECK (amount_minor > 0),
+                currency TEXT NOT NULL CHECK (currency = 'RUB'),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (scope, scope_key)
+            )""",
+            """CREATE TABLE IF NOT EXISTS read_only_request_budgets (
+                action TEXT PRIMARY KEY,
+                last_started_at TEXT,
+                last_completed_at TEXT,
+                failure_count INTEGER NOT NULL DEFAULT 0 CHECK (failure_count >= 0),
+                circuit_until TEXT
+            )""",
+            """CREATE TABLE IF NOT EXISTS read_only_readiness_state (
+                singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                own_lots_available INTEGER NOT NULL DEFAULT 0 CHECK (own_lots_available IN (0, 1)),
+                confirmed_own_mappings INTEGER NOT NULL DEFAULT 0 CHECK (confirmed_own_mappings >= 0),
+                own_mappings_attention INTEGER NOT NULL DEFAULT 0 CHECK (own_mappings_attention >= 0),
+                trusted_sellers INTEGER NOT NULL DEFAULT 0 CHECK (trusted_sellers >= 0),
+                confirmed_competitor_mappings INTEGER NOT NULL DEFAULT 0 CHECK (confirmed_competitor_mappings >= 0),
+                competitor_mappings_attention INTEGER NOT NULL DEFAULT 0 CHECK (competitor_mappings_attention >= 0),
+                lots_with_minimum_prices INTEGER NOT NULL DEFAULT 0 CHECK (lots_with_minimum_prices >= 0),
+                dry_run_success INTEGER NOT NULL DEFAULT 0 CHECK (dry_run_success IN (0, 1)),
+                dry_run_ready INTEGER NOT NULL DEFAULT 0 CHECK (dry_run_ready >= 0),
+                dry_run_blocked INTEGER NOT NULL DEFAULT 0 CHECK (dry_run_blocked >= 0),
+                mutation_attempts INTEGER NOT NULL DEFAULT 0 CHECK (mutation_attempts = 0),
+                secrets_exposed INTEGER NOT NULL DEFAULT 0 CHECK (secrets_exposed = 0),
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """INSERT OR IGNORE INTO read_only_readiness_state
+            (singleton_id) VALUES (1)""",
+        ),
+    ),
 )
 
 

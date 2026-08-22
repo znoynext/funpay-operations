@@ -58,6 +58,20 @@ and local mapping points to an active Mythic+ service code
 единственные значения key level, region, self-play/pilot и package `xN`, а
 также подтверждённое локальное соответствие stable service code.
 
+Production Telegram onboarding использует короткий безопасный flow:
+
+```text
+AUTO-DETECT -> MASS PREVIEW -> исправление только проблемных -> MASS CONFIRM
+```
+
+Parser читает public text и безопасные selected editor fields/options, хранит
+confidence/evidence/missing fields, но массово подтверждает только `HIGH` без
+конфликтов и duplicate canonical variants. Ручное исправление вводится как
+человекочитаемый вариант, например `+10 EU self-play x1`; FunPay ID не
+показывается. Подтверждённый лот получает режим `CHECK_ONLY`. Материальное
+изменение critical attributes переводит mapping в `RECHECK_REQUIRED`, а
+косметическое изменение текста не сбрасывает подтверждение.
+
 ## Service Catalog
 
 Пользовательский catalog хранится только локально в SQLite. Публичный fixture
@@ -106,6 +120,19 @@ Trusted seller автоматически относится к Mythic+. В prod
 region, key level, service format, package size и существенных условий. Любое
 материальное изменение title/form/options требует повторного подтверждения.
 
+В Telegram можно добавить до 20 nicknames одним сообщением. `fpx-engine` не
+предоставляет поддерживаемый поиск профиля по nickname, поэтому production не
+выдумывает endpoint: stable identity разрешается только по точному совпадению
+с уже доступной FunPay dialog identity и затем проверяется public profile read.
+Fuzzy match и автоматический выбор при неоднозначности запрещены. После
+подтверждения seller выполняется ограниченный discovery только для этого seller
+и подтверждённых собственных Mythic+ variants; весь рынок не сканируется.
+
+Минимально допустимые цены задаются локально как общий Mythic+ default,
+per-key batch (`+10 1000`) или exact variant override. Приоритет:
+`variant > key > global`. Значения хранятся integer minor units; отсутствующий
+minimum не придумывается и блокирует будущую write eligibility.
+
 Деньги представлены integer minor units; `float` не используется. Основная
 формула:
 
@@ -119,6 +146,19 @@ final_target = max(target, configured_minimum_price)
 общее снижение принимается только при объяснимом consensus. При отсутствии
 валидного ориентира текущая цена сохраняется. Режимы `fixed_price`, `paused` и
 `check_only` соблюдаются. Production показывает решение, но не записывает его.
+
+`💰 Проверить цены` делает только реальные authenticated reads подтверждённых
+competitor lots. Для единственного seller выполняется ограниченная серия из
+трёх последовательных наблюдений; при нескольких sellers используется
+независимый consensus. Readiness показывает confirmed mappings, floors,
+`READY/WARNING/BLOCKED` и всегда отображает `LIVE: 🔒 Выключен`. Кнопка
+подготовки первого live-теста только объясняет необходимость отдельного
+разрешения и не имеет write capability.
+
+Semantic request budgets разделены для own-lot refresh, seller lookup,
+competitor discovery и price observation. Повторные callbacks используют cache;
+`429`, `403`, repeated failures и auth anomalies останавливают текущий scan и
+открывают bounded circuit breaker без обходных техник.
 
 ## Сообщения и Telegram
 
@@ -157,6 +197,11 @@ read adapter использует `fpx-engine==0.7.4` (MIT); ручные `read_
 `safe` всегда пропускает writes, `dry_run` строит operation без отправки,
 `live` архитектурно существует, но production factory жёстко задаёт
 `live_execution_enabled=False`.
+
+Combined onboarding получает не полный adapter, а узкий
+`OnboardingReadBoundary`: profile, own-lot details, dialogs и public seller-lot
+details. Разрешение известного mutation method перехватывается trap. В
+production composition отсутствует reachable price/lot/raise/reply adapter.
 
 ## Локальные секреты и данные
 
